@@ -7,7 +7,7 @@
     "start": "node --experimental-sqlite src/index.js"
   },
   "dependencies": {
-    "@grammyjs/runner": "^2.0.9",
+    "@grammyjs/runner": "^2.0.3",
     "dotenv": "^16.4.5",
     "grammy": "^1.30.0"
   }
