@@ -1,0 +1,14 @@
+{
+  "name": "temka-random-bot",
+  "version": "1.0.0",
+  "description": "Secure, provably fair Telegram contest & giveaway bot inspired by Best Random Bot",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node --experimental-sqlite src/index.js"
+  },
+  "dependencies": {
+    "@grammyjs/runner": "^2.0.9",
+    "dotenv": "^16.4.5",
+    "grammy": "^1.30.0"
+  }
+}

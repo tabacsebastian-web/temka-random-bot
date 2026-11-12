@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: temka-random-bot
+    env: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DB_PATH
+        value: data/temka.db
+      - key: DEFAULT_LANG
+        value: ru
+
