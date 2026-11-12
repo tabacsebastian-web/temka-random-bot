@@ -402,7 +402,8 @@ bot.on('message', async (ctx) => {
         .text(ctx.t('btn_cancel'), 'wizard_cancel');
 
       const channelName = targetChat.title || targetChat.username || 'Channel';
-      const handle = targetChat.username ? `@${targetChat.username}` : 'Private Channel';
+      const cleanHandle = targetChat.username ? targetChat.username.replace(/^@/, '') : '';
+      const handle = cleanHandle ? `@${cleanHandle}` : 'Private Channel';
 
       return ctx.reply(ctx.t('channel_added', channelName, handle), {
         parse_mode: 'HTML',
@@ -475,10 +476,12 @@ bot.callbackQuery('wizard_done_channels', async (ctx) => {
 
 // Custom date callback
 bot.callbackQuery('dur_custom', async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!ctx.from) return;
+  if (!ctx.from) return ctx.answerCallbackQuery();
   const session = db.sessions.get(ctx.from.id);
-  if (!session) return;
+  if (!session || !session.data) {
+    return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+  }
+  await ctx.answerCallbackQuery();
 
   db.sessions.set(ctx.from.id, 'step_custom_date', session.data);
 
@@ -490,10 +493,12 @@ bot.callbackQuery('dur_custom', async (ctx) => {
 
 // Duration selection callback (preset buttons)
 bot.callbackQuery(/^dur_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!ctx.from) return;
+  if (!ctx.from) return ctx.answerCallbackQuery();
   const session = db.sessions.get(ctx.from.id);
-  if (!session) return;
+  if (!session || !session.data) {
+    return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+  }
+  await ctx.answerCallbackQuery();
 
   const durationMs = parseInt(ctx.match[1], 10);
   const endAt = Date.now() + durationMs;
@@ -503,10 +508,12 @@ bot.callbackQuery(/^dur_(\d+)$/, async (ctx) => {
 
 // Publish giveaway callback
 bot.callbackQuery('wizard_publish', async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!ctx.from) return;
+  if (!ctx.from) return ctx.answerCallbackQuery();
   const session = db.sessions.get(ctx.from.id);
-  if (!session || !session.data) return;
+  if (!session || !session.data || !session.data.channels || session.data.channels.length === 0) {
+    return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+  }
+  await ctx.answerCallbackQuery();
 
   const d = session.data;
   const targetChannel = d.channels[0]; // Publish to primary channel

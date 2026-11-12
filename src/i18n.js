@@ -60,6 +60,7 @@ const strings = {
     wizard_preview_title: '👀 <b>Contest Preview</b>\n\nReview your giveaway before publishing:',
     btn_publish_to_channel: '🚀 Publish Giveaway',
     btn_cancel: '❌ Cancel',
+    session_expired: '⚠️ Session expired. Please send /start to create a giveaway.',
     cancelled: '❌ Giveaway creation cancelled.',
 
     // Giveaway Post Content
@@ -172,6 +173,7 @@ const strings = {
     wizard_preview_title: '👀 <b>Предпросмотр розыгрыша</b>\n\nПроверьте условия перед публикацией:',
     btn_publish_to_channel: '🚀 Опубликовать в канале',
     btn_cancel: '❌ Отмена',
+    session_expired: '⚠️ Сессия истекла. Пожалуйста, отправьте /start, чтобы создать розыгрыш.',
     cancelled: '❌ Создание розыгрыша отменено.',
 
     // Giveaway Post Content
