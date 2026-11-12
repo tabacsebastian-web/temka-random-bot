@@ -49,6 +49,13 @@ const strings = {
     btn_24_hours: '24 Hours',
     btn_3_days: '3 Days',
     btn_7_days: '7 Days',
+    btn_custom_date: '📅 Custom Date & Time',
+    wizard_step_custom_date:
+      `📅 <b>Exact End Date & Time</b>\n\n` +
+      `Send the exact date and time when the contest should end.\n\n` +
+      `Format: <code>DD.MM.YYYY HH:MM</code> (e.g. <code>25.11.2026 18:00</code> UTC) or <code>DD.MM HH:MM</code> (e.g. <code>25.11 18:00</code>):`,
+    wizard_invalid_date: '⚠️ Invalid date format. Please send in format: <code>DD.MM.YYYY HH:MM</code> (e.g. <code>25.11.2026 18:00</code>)',
+    wizard_date_in_past: '⚠️ The end date must be in the future! Please enter a date/time in the future.',
 
     wizard_preview_title: '👀 <b>Contest Preview</b>\n\nReview your giveaway before publishing:',
     btn_publish_to_channel: '🚀 Publish Giveaway',
@@ -154,6 +161,13 @@ const strings = {
     btn_24_hours: '24 часа',
     btn_3_days: '3 дня',
     btn_7_days: '7 дней',
+    btn_custom_date: '📅 Указать точную дату',
+    wizard_step_custom_date:
+      `📅 <b>Точная дата и время окончания</b>\n\n` +
+      `Отправьте дату и время, когда должен завершиться розыгрыш.\n\n` +
+      `Формат: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code> (например: <code>25.11.2026 18:00</code> UTC) или <code>ДД.ММ ЧЧ:ММ</code> (например: <code>25.11 18:00</code>):`,
+    wizard_invalid_date: '⚠️ Неверный формат даты. Пожалуйста, отправьте в формате: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code> (например: <code>25.11.2026 18:00</code>)',
+    wizard_date_in_past: '⚠️ Дата окончания должна быть в будущем! Пожалуйста, укажите дату вперёд.',
 
     wizard_preview_title: '👀 <b>Предпросмотр розыгрыша</b>\n\nПроверьте условия перед публикацией:',
     btn_publish_to_channel: '🚀 Опубликовать в канале',

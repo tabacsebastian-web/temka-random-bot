@@ -46,6 +46,84 @@ function formatDate(timestamp, lang) {
   }) + ' UTC';
 }
 
+// Helper to parse custom date & time
+function parseCustomDate(input) {
+  const str = input.trim();
+  // Format 1: DD.MM.YYYY HH:MM (e.g. 25.11.2026 18:00)
+  const m1 = str.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})\s+(\d{1,2}):(\d{2})$/);
+  if (m1) {
+    const day = parseInt(m1[1], 10);
+    const month = parseInt(m1[2], 10) - 1;
+    const year = parseInt(m1[3], 10);
+    const hours = parseInt(m1[4], 10);
+    const mins = parseInt(m1[5], 10);
+    const d = new Date(Date.UTC(year, month, day, hours, mins));
+    if (!isNaN(d.getTime())) return d.getTime();
+  }
+
+  // Format 2: DD.MM HH:MM (current year)
+  const m2 = str.match(/^(\d{1,2})[./-](\d{1,2})\s+(\d{1,2}):(\d{2})$/);
+  if (m2) {
+    const now = new Date();
+    const day = parseInt(m2[1], 10);
+    const month = parseInt(m2[2], 10) - 1;
+    let year = now.getUTCFullYear();
+    const hours = parseInt(m2[3], 10);
+    const mins = parseInt(m2[4], 10);
+    let d = new Date(Date.UTC(year, month, day, hours, mins));
+    if (d.getTime() < Date.now() - 3600000) {
+      d = new Date(Date.UTC(year + 1, month, day, hours, mins));
+    }
+    if (!isNaN(d.getTime())) return d.getTime();
+  }
+
+  // Format 3: YYYY-MM-DD HH:MM
+  const m3 = str.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})\s+(\d{1,2}):(\d{2})$/);
+  if (m3) {
+    const year = parseInt(m3[1], 10);
+    const month = parseInt(m3[2], 10) - 1;
+    const day = parseInt(m3[3], 10);
+    const hours = parseInt(m3[4], 10);
+    const mins = parseInt(m3[5], 10);
+    const d = new Date(Date.UTC(year, month, day, hours, mins));
+    if (!isNaN(d.getTime())) return d.getTime();
+  }
+
+  return null;
+}
+
+// Helper to show preview card
+async function showGiveawayPreview(ctx, session, endAt) {
+  const { serverSeed, seedHash } = fairness.generateSeed();
+  const publicId = crypto.randomBytes(4).toString('hex'); // 8 char unique id
+
+  session.data.end_at = endAt;
+  session.data.seed_hash = seedHash;
+  session.data.server_seed = serverSeed;
+  session.data.public_id = publicId;
+
+  db.sessions.set(ctx.from.id, 'preview', session.data);
+
+  const previewText = ctx.t('wizard_preview_title') + '\n\n' + ctx.t('giveaway_card', {
+    prize: session.data.prize,
+    description: session.data.description,
+    winnersCount: session.data.winners_count,
+    channels: session.data.channels,
+    endAtFormatted: formatDate(endAt, ctx.lang),
+    seedHash: seedHash
+  });
+
+  const kb = new InlineKeyboard()
+    .text(ctx.t('btn_publish_to_channel'), 'wizard_publish').row()
+    .text(ctx.t('btn_cancel'), 'wizard_cancel');
+
+  await ctx.reply(previewText, {
+    parse_mode: 'HTML',
+    reply_markup: kb,
+    disable_web_page_preview: true
+  });
+}
+
 // /start command
 bot.command('start', async (ctx) => {
   const payload = ctx.match;
@@ -336,6 +414,22 @@ bot.on('message', async (ctx) => {
       return ctx.reply(ctx.t('channel_error_not_admin', name), { parse_mode: 'HTML' });
     }
   }
+
+  // STEP 5 (Custom Date): Exact end date input
+  if (session.step === 'step_custom_date') {
+    if (!text) {
+      return ctx.reply(ctx.t('wizard_invalid_date'), { parse_mode: 'HTML' });
+    }
+    const endAt = parseCustomDate(text);
+    if (!endAt) {
+      return ctx.reply(ctx.t('wizard_invalid_date'), { parse_mode: 'HTML' });
+    }
+    if (endAt <= Date.now() + 60000) {
+      return ctx.reply(ctx.t('wizard_date_in_past'), { parse_mode: 'HTML' });
+    }
+
+    return showGiveawayPreview(ctx, session, endAt);
+  }
 });
 
 // Skip description callback
@@ -370,6 +464,7 @@ bot.callbackQuery('wizard_done_channels', async (ctx) => {
     .text(ctx.t('btn_24_hours'), 'dur_86400000')
     .text(ctx.t('btn_3_days'), 'dur_259200000').row()
     .text(ctx.t('btn_7_days'), 'dur_604800000').row()
+    .text(ctx.t('btn_custom_date'), 'dur_custom').row()
     .text(ctx.t('btn_cancel'), 'wizard_cancel');
 
   await ctx.reply(ctx.t('wizard_step_duration'), {
@@ -378,7 +473,22 @@ bot.callbackQuery('wizard_done_channels', async (ctx) => {
   });
 });
 
-// Duration selection callback
+// Custom date callback
+bot.callbackQuery('dur_custom', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!ctx.from) return;
+  const session = db.sessions.get(ctx.from.id);
+  if (!session) return;
+
+  db.sessions.set(ctx.from.id, 'step_custom_date', session.data);
+
+  await ctx.reply(ctx.t('wizard_step_custom_date'), {
+    parse_mode: 'HTML',
+    reply_markup: new InlineKeyboard().text(ctx.t('btn_cancel'), 'wizard_cancel')
+  });
+});
+
+// Duration selection callback (preset buttons)
 bot.callbackQuery(/^dur_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!ctx.from) return;
@@ -388,35 +498,7 @@ bot.callbackQuery(/^dur_(\d+)$/, async (ctx) => {
   const durationMs = parseInt(ctx.match[1], 10);
   const endAt = Date.now() + durationMs;
 
-  const { serverSeed, seedHash } = fairness.generateSeed();
-  const publicId = crypto.randomBytes(4).toString('hex'); // 8 char unique id
-
-  session.data.end_at = endAt;
-  session.data.seed_hash = seedHash;
-  session.data.server_seed = serverSeed;
-  session.data.public_id = publicId;
-
-  db.sessions.set(ctx.from.id, 'preview', session.data);
-
-  // Preview card
-  const previewText = ctx.t('wizard_preview_title') + '\n\n' + ctx.t('giveaway_card', {
-    prize: session.data.prize,
-    description: session.data.description,
-    winnersCount: session.data.winners_count,
-    channels: session.data.channels,
-    endAtFormatted: formatDate(endAt, ctx.lang),
-    seedHash: seedHash
-  });
-
-  const kb = new InlineKeyboard()
-    .text(ctx.t('btn_publish_to_channel'), 'wizard_publish').row()
-    .text(ctx.t('btn_cancel'), 'wizard_cancel');
-
-  await ctx.reply(previewText, {
-    parse_mode: 'HTML',
-    reply_markup: kb,
-    disable_web_page_preview: true
-  });
+  await showGiveawayPreview(ctx, session, endAt);
 });
 
 // Publish giveaway callback
