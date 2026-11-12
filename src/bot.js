@@ -734,6 +734,38 @@ async function finalizeGiveaway(giveawayId) {
   } catch (err) {
     console.error('Error posting finished giveaway to channel:', err);
   }
+
+  // 1. Send private DM to each winner (if user has started bot)
+  const channelTitle = (g.required_channels && g.required_channels[0]) ? g.required_channels[0].title : 'Vertex Beats';
+  for (const w of verifiedWinners) {
+    try {
+      const userObj = db.users.get(w.user_id);
+      const userLang = userObj ? (userObj.lang || 'en') : 'en';
+      const dmText = t(userLang, 'winner_dm_notification', {
+        prize: g.prize,
+        channel: channelTitle
+      });
+      await bot.api.sendMessage(w.user_id, dmText, { parse_mode: 'HTML' });
+    } catch (dmErr) {
+      // User hasn't started bot in DM yet; the public channel tag will notify them
+    }
+  }
+
+  // 2. Notify the contest creator with the full winners report
+  try {
+    if (g.creator_id) {
+      await bot.api.sendMessage(
+        g.creator_id,
+        `🏆 <b>Giveaway Finished: ${g.prize}</b>\n\n` +
+        `The draw has completed on your channel! Here are your winners:\n\n` +
+        (winnersText || 'No winners') +
+        `\nReach out to them for their shoutout!`,
+        { parse_mode: 'HTML' }
+      );
+    }
+  } catch (creatorErr) {
+    // ignore
+  }
 }
 
 module.exports = {

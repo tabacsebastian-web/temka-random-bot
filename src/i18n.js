@@ -92,10 +92,15 @@ const strings = {
 
     // Callback responses
     alert_already_participating: '✅ You are already participating in this giveaway! Good luck!',
-    alert_success_joined: '🎉 Success! You are now entered into the giveaway! Best of luck!',
+    alert_success_joined: '🎉 Success! You are now entered into the giveaway!\n\n💡 Tip: Open @TemkaDrawBot and press Start so we can notify you in private if you win!',
     alert_must_subscribe: (missingList) =>
       `❌ You are not subscribed to all required channels!\n\nPlease subscribe to:\n${missingList}\nthen press Participate again.`,
     alert_ended: '⏳ This giveaway has already ended!',
+
+    winner_dm_notification: ({ prize, channel }) =>
+      `🎉 <b>Congratulations!</b>\n\n` +
+      `You were chosen as a winner for <b>${prize}</b> on <b>${channel}</b>! 🏆\n\n` +
+      `Please contact the channel administrator to claim your shoutout/prize!`,
 
     // Finished giveaway card
     giveaway_finished_card: ({ prize, winnersText, serverSeed, seedHash, finishedAtFormatted }) =>
@@ -205,10 +210,15 @@ const strings = {
 
     // Callback responses
     alert_already_participating: '✅ Вы уже участвуете в этом розыгрыше! Удачи!',
-    alert_success_joined: '🎉 Вы успешно зарегистрированы в розыгрыше! Желаем удачи!',
+    alert_success_joined: '🎉 Вы успешно зарегистрированы в розыгрыше!\n\n💡 Совет: Откройте @TemkaDrawBot и нажмите Старт, чтобы бот смог прислать вам уведомление в ЛС в случае победы!',
     alert_must_subscribe: (missingList) =>
       `❌ Вы подписались не на все каналы!\n\nПожалуйста, подпишитесь на:\n${missingList}\nи затем нажмите «Участвовать» снова.`,
     alert_ended: '⏳ Этот розыгрыш уже завершён!',
+
+    winner_dm_notification: ({ prize, channel }) =>
+      `🎉 <b>Поздравляем!</b>\n\n` +
+      `Вы были выбраны победителем в розыгрыше <b>${prize}</b> на канале <b>${channel}</b>! 🏆\n\n` +
+      `Свяжитесь с администратором канала для получения приза!`,
 
     // Finished giveaway card
     giveaway_finished_card: ({ prize, winnersText, serverSeed, seedHash, finishedAtFormatted }) =>
