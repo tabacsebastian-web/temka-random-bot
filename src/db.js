@@ -112,6 +112,7 @@ const participantQueries = {
     INSERT OR IGNORE INTO participants (giveaway_id, user_id, username, first_name, joined_at)
     VALUES (?, ?, ?, ?, ?)
   `),
+  remove: db.prepare('DELETE FROM participants WHERE giveaway_id = ? AND user_id = ?'),
   count: db.prepare('SELECT COUNT(*) as cnt FROM participants WHERE giveaway_id = ?'),
   isParticipating: db.prepare('SELECT 1 FROM participants WHERE giveaway_id = ? AND user_id = ?'),
   listForGiveaway: db.prepare('SELECT user_id, username, first_name, joined_at FROM participants WHERE giveaway_id = ? ORDER BY joined_at ASC')
@@ -202,6 +203,10 @@ module.exports = {
         firstName || '',
         Date.now()
       );
+      return res.changes > 0;
+    },
+    remove: (giveawayId, userId) => {
+      const res = participantQueries.remove.run(giveawayId, userId);
       return res.changes > 0;
     },
     count: (giveawayId) => {

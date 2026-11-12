@@ -92,6 +92,7 @@ const strings = {
 
     // Callback responses
     alert_already_participating: '✅ You are already participating in this giveaway! Good luck!',
+    alert_left_giveaway: '👋 You have left the giveaway. You are no longer participating.\n\n(Click Participate again if you change your mind!)',
     alert_success_joined: '🎉 Success! You are now entered into the giveaway!\n\n💡 Tip: Open @TemkaDrawBot and press Start so we can notify you in private if you win!',
     alert_must_subscribe: (missingList) =>
       `❌ You are not subscribed to all required channels!\n\nPlease subscribe to:\n${missingList}\nthen press Participate again.`,
@@ -212,6 +213,7 @@ const strings = {
 
     // Callback responses
     alert_already_participating: '✅ Вы уже участвуете в этом розыгрыше! Удачи!',
+    alert_left_giveaway: '👋 Вы вышли из розыгрыша и больше не участвуете.\n\n(Нажмите «Участвовать» снова, если передумаете!)',
     alert_success_joined: '🎉 Вы успешно зарегистрированы в розыгрыше!\n\n💡 Совет: Откройте @TemkaDrawBot и нажмите Старт, чтобы бот смог прислать вам уведомление в ЛС в случае победы!',
     alert_must_subscribe: (missingList) =>
       `❌ Вы подписались не на все каналы!\n\nПожалуйста, подпишитесь на:\n${missingList}\nи затем нажмите «Участвовать» снова.`,

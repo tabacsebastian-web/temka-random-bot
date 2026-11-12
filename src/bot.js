@@ -588,7 +588,20 @@ bot.callbackQuery(/^join_([a-f0-9]+)$/, async (ctx) => {
   const alreadyIn = db.participants.isParticipating(g.id, userId);
 
   if (alreadyIn) {
-    return ctx.answerCallbackQuery({ text: ctx.t('alert_already_participating'), show_alert: true });
+    // User is already in -> toggle OFF (leave giveaway)
+    db.participants.remove(g.id, userId);
+    const newCount = db.participants.count(g.id);
+
+    await ctx.answerCallbackQuery({ text: ctx.t('alert_left_giveaway'), show_alert: true });
+
+    try {
+      const updatedKb = new InlineKeyboard()
+        .text(ctx.t('btn_participate', newCount), `join_${g.public_id}`).row()
+        .text(ctx.t('btn_stats'), `stats_${g.public_id}`);
+
+      await ctx.editMessageReplyMarkup({ reply_markup: updatedKb });
+    } catch (err) {}
+    return;
   }
 
   // Verify all required channels

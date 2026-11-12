@@ -55,5 +55,10 @@ assert(db.participants.count(testGid) === 1, 'Participant counted');
 assert(db.participants.isParticipating(testGid, 111) === true, 'Participant detected');
 assert(db.participants.isParticipating(testGid, 222) === false, 'Non-participant detected');
 
+// Test remove
+db.participants.remove(testGid, 111);
+assert(db.participants.count(testGid) === 0, 'Participant removed');
+assert(db.participants.isParticipating(testGid, 111) === false, 'Participant no longer in DB');
+
 console.log('✅ Database layer verified successfully!');
 console.log('🎉 All unit tests passed!');
