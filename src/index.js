@@ -4,8 +4,11 @@ const { bot } = require('./bot');
 const { startScheduler, stopScheduler } = require('./scheduler');
 const config = require('./config');
 
+const SERVER_START_TIME = new Date().toISOString();
+const VERSION = '2.2.0-auto-recover';
+
 async function main() {
-  console.log(`🤖 Starting ${config.BOT_NAME} (@${config.BOT_USERNAME})...`);
+  console.log(`🤖 Starting ${config.BOT_NAME} (@${config.BOT_USERNAME}) v${VERSION}...`);
 
   // Start background scheduler for finishing contests
   startScheduler(10000);
@@ -17,7 +20,13 @@ async function main() {
   const port = process.env.PORT || 3000;
   const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', bot: config.BOT_USERNAME, time: new Date().toISOString() }));
+    res.end(JSON.stringify({
+      status: 'ok',
+      bot: config.BOT_USERNAME,
+      version: VERSION,
+      startedAt: SERVER_START_TIME,
+      time: new Date().toISOString()
+    }));
   });
 
   server.listen(port, () => {
