@@ -736,16 +736,29 @@ async function finalizeGiveaway(giveawayId) {
   }
 
   // 1. Send private DM to each winner (if user has started bot)
-  const channelTitle = (g.required_channels && g.required_channels[0]) ? g.required_channels[0].title : 'Vertex Beats';
+  const primaryChannel = (g.required_channels && g.required_channels[0]) ? g.required_channels[0] : null;
+  const channelTitle = primaryChannel ? (primaryChannel.title || 'Vertex Beats') : 'Vertex Beats';
+  const rawHandle = primaryChannel ? (primaryChannel.username || 'CyberBeats44').replace(/^@/, '') : 'CyberBeats44';
+  const directLink = `https://t.me/${rawHandle}?direct`;
+
   for (const w of verifiedWinners) {
     try {
       const userObj = db.users.get(w.user_id);
       const userLang = userObj ? (userObj.lang || 'en') : 'en';
       const dmText = t(userLang, 'winner_dm_notification', {
         prize: g.prize,
-        channel: channelTitle
+        channel: channelTitle,
+        directLink: directLink
       });
-      await bot.api.sendMessage(w.user_id, dmText, { parse_mode: 'HTML' });
+
+      const dmKb = new InlineKeyboard()
+        .url(t(userLang, 'btn_claim_shoutout'), directLink);
+
+      await bot.api.sendMessage(w.user_id, dmText, {
+        parse_mode: 'HTML',
+        reply_markup: dmKb,
+        disable_web_page_preview: true
+      });
     } catch (dmErr) {
       // User hasn't started bot in DM yet; the public channel tag will notify them
     }

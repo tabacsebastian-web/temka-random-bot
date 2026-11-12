@@ -97,10 +97,12 @@ const strings = {
       `❌ You are not subscribed to all required channels!\n\nPlease subscribe to:\n${missingList}\nthen press Participate again.`,
     alert_ended: '⏳ This giveaway has already ended!',
 
-    winner_dm_notification: ({ prize, channel }) =>
+    winner_dm_notification: ({ prize, channel, directLink }) =>
       `🎉 <b>Congratulations!</b>\n\n` +
-      `You were chosen as a winner for <b>${prize}</b> on <b>${channel}</b>! 🏆\n\n` +
-      `Please contact the channel administrator to claim your shoutout/prize!`,
+      `You were chosen as a winner for a shoutout in the next post on ${channel}.\n\n` +
+      `Please contact the channel administration through direct messages to claim your shoutout:\n` +
+      `<a href="${directLink}">${directLink}</a>`,
+    btn_claim_shoutout: '💬 Contact Administration (Claim Shoutout)',
 
     // Finished giveaway card
     giveaway_finished_card: ({ prize, winnersText, serverSeed, seedHash, finishedAtFormatted }) =>
@@ -215,10 +217,12 @@ const strings = {
       `❌ Вы подписались не на все каналы!\n\nПожалуйста, подпишитесь на:\n${missingList}\nи затем нажмите «Участвовать» снова.`,
     alert_ended: '⏳ Этот розыгрыш уже завершён!',
 
-    winner_dm_notification: ({ prize, channel }) =>
+    winner_dm_notification: ({ prize, channel, directLink }) =>
       `🎉 <b>Поздравляем!</b>\n\n` +
-      `Вы были выбраны победителем в розыгрыше <b>${prize}</b> на канале <b>${channel}</b>! 🏆\n\n` +
-      `Свяжитесь с администратором канала для получения приза!`,
+      `Вы были выбраны победителем на шаут-аут в следующем посте на ${channel}.\n\n` +
+      `Пожалуйста, свяжитесь с администрацией канала в личных сообщениях для получения шаут-аута:\n` +
+      `<a href="${directLink}">${directLink}</a>`,
+    btn_claim_shoutout: '💬 Написать в ЛС (Получить шаут-аут)',
 
     // Finished giveaway card
     giveaway_finished_card: ({ prize, winnersText, serverSeed, seedHash, finishedAtFormatted }) =>
