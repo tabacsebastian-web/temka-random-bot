@@ -571,10 +571,73 @@ bot.callbackQuery('wizard_publish', async (ctx) => {
   }
 });
 
+// Helper to recover giveaway from channel post if missing after container restart
+function recoverGiveawayFromMessage(publicId, message) {
+  if (!message || !message.text) return null;
+  const txt = message.text;
+  const prizeMatch = txt.match(/GIVEAWAY:\s*(.+?)(?:\n|$)/i) || txt.match(/РОЗЫГРЫШ:\s*(.+?)(?:\n|$)/i);
+  const winnersMatch = txt.match(/Winners:\s*(\d+)/i) || txt.match(/Количество победителей:\s*(\d+)/i);
+  const hashMatch = txt.match(/([a-f0-9]{64})/);
+
+  const prize = prizeMatch ? prizeMatch[1].trim() : 'Giveaway';
+  const winnersCount = winnersMatch ? parseInt(winnersMatch[1], 10) : 1;
+  const seedHash = hashMatch ? hashMatch[1] : '';
+
+  const chat = message.chat;
+  const channelObj = {
+    id: chat.id,
+    title: chat.title || 'Channel',
+    username: chat.username || ''
+  };
+
+  let endAt = Date.now() + 3 * 86400000;
+  const endsMatch = txt.match(/Ends:\s*(.+?)(?:\n|$)/i) || txt.match(/Окончание:\s*(.+?)(?:\n|$)/i);
+  if (endsMatch) {
+    const rawDate = endsMatch[1].replace(/UTC/i, '').trim();
+    const year = new Date().getUTCFullYear();
+    const parsed = Date.parse(`${rawDate} ${year} UTC`) || Date.parse(rawDate);
+    if (!isNaN(parsed) && parsed > Date.now()) {
+      endAt = parsed;
+    }
+  }
+
+  const { serverSeed } = fairness.generateSeed();
+
+  return {
+    public_id: publicId,
+    creator_id: 0,
+    prize: prize,
+    description: '',
+    winners_count: winnersCount,
+    required_channels: [channelObj],
+    target_chat_id: String(chat.id),
+    channel_post_chat_id: String(chat.id),
+    channel_post_message_id: message.message_id,
+    status: 'active',
+    end_type: 'time',
+    end_at: endAt,
+    seed_hash: seedHash,
+    server_seed: serverSeed
+  };
+}
+
 // PARTICIPATE IN GIVEAWAY (Anti-cheat & Verification)
 bot.callbackQuery(/^join_([a-f0-9]+)$/, async (ctx) => {
   const publicId = ctx.match[1];
-  const g = db.giveaways.getByPublicId(publicId);
+  let g = db.giveaways.getByPublicId(publicId);
+
+  // Auto-recover if missing from DB (e.g. after container redeploy)
+  if (!g && ctx.callbackQuery?.message) {
+    const recovered = recoverGiveawayFromMessage(publicId, ctx.callbackQuery.message);
+    if (recovered) {
+      try {
+        const gid = db.giveaways.create(recovered);
+        g = db.giveaways.getById(gid);
+      } catch (e) {
+        g = db.giveaways.getByPublicId(publicId);
+      }
+    }
+  }
 
   if (!g) {
     return ctx.answerCallbackQuery({ text: 'Giveaway not found.', show_alert: true });
@@ -648,7 +711,20 @@ bot.callbackQuery(/^join_([a-f0-9]+)$/, async (ctx) => {
 // STATS BUTTON
 bot.callbackQuery(/^stats_([a-f0-9]+)$/, async (ctx) => {
   const publicId = ctx.match[1];
-  const g = db.giveaways.getByPublicId(publicId);
+  let g = db.giveaways.getByPublicId(publicId);
+
+  if (!g && ctx.callbackQuery?.message) {
+    const recovered = recoverGiveawayFromMessage(publicId, ctx.callbackQuery.message);
+    if (recovered) {
+      try {
+        const gid = db.giveaways.create(recovered);
+        g = db.giveaways.getById(gid);
+      } catch (e) {
+        g = db.giveaways.getByPublicId(publicId);
+      }
+    }
+  }
+
   if (!g) return ctx.answerCallbackQuery();
 
   const count = db.participants.count(g.id);
