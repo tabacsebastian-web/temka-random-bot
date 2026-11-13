@@ -32,8 +32,17 @@ assert(t('en', 'btn_create_giveaway') === '➕ Create Giveaway');
 assert(t('ru', 'btn_create_giveaway') === '➕ Создать розыгрыш');
 console.log('✅ i18n dictionary verified successfully!');
 
-// 3. Test Database
+// 3. Test Database + State Export/Import & Change Hooks
+let changeNotifications = 0;
+db.onChange(() => {
+  changeNotifications += 1;
+});
+
+db.users.upsert(999999, 'creator_test', 'Creator', 'en');
+assert(changeNotifications >= 1, 'onChange must fire on user upsert');
+
 const testPubId = `test_pub_${Date.now()}`;
+const customCreatedAt = Date.now() - 5000;
 const testGid = db.giveaways.create({
   public_id: testPubId,
   creator_id: 999999,
@@ -43,22 +52,49 @@ const testGid = db.giveaways.create({
   required_channels: [{ id: -1001234567, title: 'Test Channel', username: 'testchannel' }],
   end_at: Date.now() + 3600000,
   seed_hash: seedHash,
-  server_seed: serverSeed
+  server_seed: serverSeed,
+  channel_post_chat_id: '-100999888',
+  channel_post_message_id: 42,
+  created_at: customCreatedAt
 });
 assert(testGid > 0, 'Giveaway inserted');
 
 const fetched = db.giveaways.getByPublicId(testPubId);
 assert(fetched && fetched.prize === '100 USDT', 'Giveaway query matches');
+assert(fetched.channel_post_chat_id === '-100999888', 'channel_post_chat_id must persist on create');
+assert(fetched.channel_post_message_id === 42, 'channel_post_message_id must persist on create');
+assert(fetched.created_at === customCreatedAt, 'created_at must persist on create');
 
+const changesBeforeParticipant = changeNotifications;
 db.participants.add(testGid, 111, 'user1', 'First');
 assert(db.participants.count(testGid) === 1, 'Participant counted');
 assert(db.participants.isParticipating(testGid, 111) === true, 'Participant detected');
 assert(db.participants.isParticipating(testGid, 222) === false, 'Non-participant detected');
+assert(changeNotifications > changesBeforeParticipant, 'onChange must fire on participant add');
+
+const exported = db.exportState();
+assert(Array.isArray(exported.users), 'exportState must include users array');
+assert(Array.isArray(exported.giveaways), 'exportState must include giveaways array');
+assert(Array.isArray(exported.participants), 'exportState must include participants array');
+assert(
+  exported.giveaways.some((g) => g.public_id === testPubId && g.channel_post_message_id === 42),
+  'exportState must include newly created giveaway'
+);
+assert(
+  exported.participants.some((p) => p.giveaway_public_id === testPubId && p.user_id === 111),
+  'exportState must key participants by giveaway_public_id'
+);
+
+// Test importState idempotency / round-trip
+db.importState(exported);
+assert(db.participants.isParticipating(testGid, 111) === true, 'Participant preserved after importState');
 
 // Test remove
+const changesBeforeRemove = changeNotifications;
 db.participants.remove(testGid, 111);
 assert(db.participants.count(testGid) === 0, 'Participant removed');
 assert(db.participants.isParticipating(testGid, 111) === false, 'Participant no longer in DB');
+assert(changeNotifications > changesBeforeRemove, 'onChange must fire on participant remove');
 
 console.log('✅ Database layer verified successfully!');
 console.log('🎉 All unit tests passed!');

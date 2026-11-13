@@ -130,22 +130,103 @@ const sessionQueries = {
   clear: db.prepare('DELETE FROM sessions WHERE user_id = ?')
 };
 
+let changeListener = null;
+function notifyChange() {
+  if (typeof changeListener === 'function') {
+    changeListener();
+  }
+}
+
 module.exports = {
   db,
+  onChange: (cb) => {
+    changeListener = cb;
+  },
+  exportState: () => {
+    const users = db.prepare('SELECT * FROM users').all();
+    const giveaways = db.prepare('SELECT * FROM giveaways').all();
+    const participants = db.prepare(`
+      SELECT p.user_id, p.username, p.first_name, p.joined_at, g.public_id AS giveaway_public_id
+      FROM participants p
+      JOIN giveaways g ON g.id = p.giveaway_id
+    `).all();
+    return { users, giveaways, participants, exportedAt: Date.now() };
+  },
+  importState: (state) => {
+    if (!state || typeof state !== 'object') return;
+    const insertUser = db.prepare(`
+      INSERT OR IGNORE INTO users (user_id, username, first_name, lang, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    for (const u of state.users || []) {
+      insertUser.run(u.user_id, u.username || null, u.first_name || '', u.lang || config.DEFAULT_LANG, u.created_at || Date.now());
+    }
+
+    const insertGiveaway = db.prepare(`
+      INSERT OR IGNORE INTO giveaways (
+        public_id, creator_id, prize, description, winners_count,
+        required_channels, target_chat_id, channel_post_chat_id, channel_post_message_id,
+        status, end_type, end_at, end_count, seed_hash, server_seed,
+        created_at, finished_at, winners_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const g of state.giveaways || []) {
+      const reqCh = typeof g.required_channels === 'string' ? g.required_channels : JSON.stringify(g.required_channels || []);
+      insertGiveaway.run(
+        g.public_id,
+        g.creator_id || 0,
+        g.prize || '',
+        g.description || '',
+        g.winners_count || 1,
+        reqCh,
+        g.target_chat_id || null,
+        g.channel_post_chat_id || null,
+        g.channel_post_message_id || null,
+        g.status || 'active',
+        g.end_type || 'time',
+        g.end_at || null,
+        g.end_count || 0,
+        g.seed_hash || '',
+        g.server_seed || '',
+        g.created_at || Date.now(),
+        g.finished_at || null,
+        g.winners_json || null
+      );
+    }
+
+    const findGiveaway = db.prepare('SELECT id FROM giveaways WHERE public_id = ?');
+    const insertParticipant = db.prepare(`
+      INSERT OR IGNORE INTO participants (giveaway_id, user_id, username, first_name, joined_at)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    for (const p of state.participants || []) {
+      const row = p.giveaway_public_id ? findGiveaway.get(p.giveaway_public_id) : null;
+      if (row) {
+        insertParticipant.run(row.id, p.user_id, p.username || null, p.first_name || '', p.joined_at || Date.now());
+      }
+    }
+  },
   users: {
     get: (id) => userQueries.get.get(id),
-    upsert: (id, username, firstName, lang = config.DEFAULT_LANG) =>
-      userQueries.upsert.run(id, username || null, firstName || '', lang, Date.now()),
-    setLang: (id, lang) => userQueries.setLang.run(lang, id)
+    upsert: (id, username, firstName, lang = config.DEFAULT_LANG) => {
+      const res = userQueries.upsert.run(id, username || null, firstName || '', lang, Date.now());
+      notifyChange();
+      return res;
+    },
+    setLang: (id, lang) => {
+      const res = userQueries.setLang.run(lang, id);
+      notifyChange();
+      return res;
+    }
   },
   giveaways: {
     create: (data) => {
       const stmt = db.prepare(`
         INSERT INTO giveaways (
           public_id, creator_id, prize, description, winners_count,
-          required_channels, target_chat_id, status, end_type, end_at, end_count,
-          seed_hash, server_seed, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          required_channels, target_chat_id, channel_post_chat_id, channel_post_message_id,
+          status, end_type, end_at, end_count, seed_hash, server_seed, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const info = stmt.run(
         data.public_id,
@@ -155,14 +236,17 @@ module.exports = {
         data.winners_count || 1,
         JSON.stringify(data.required_channels || []),
         data.target_chat_id || null,
+        data.channel_post_chat_id || null,
+        data.channel_post_message_id || null,
         data.status || 'draft',
         data.end_type || 'time',
         data.end_at || null,
         data.end_count || 0,
         data.seed_hash || '',
         data.server_seed || '',
-        Date.now()
+        data.created_at || Date.now()
       );
+      notifyChange();
       return info.lastInsertRowid;
     },
     getByPublicId: (publicId) => {
@@ -188,9 +272,11 @@ module.exports = {
     },
     updatePostDetails: (id, chatId, messageId) => {
       giveawayQueries.updatePostDetails.run(String(chatId), messageId, id);
+      notifyChange();
     },
     finish: (id, serverSeed, winners) => {
       giveawayQueries.finish.run(serverSeed, JSON.stringify(winners), Date.now(), id);
+      notifyChange();
     },
     listByCreator: (creatorId) => giveawayQueries.listByCreator.all(creatorId)
   },
@@ -203,10 +289,12 @@ module.exports = {
         firstName || '',
         Date.now()
       );
+      if (res.changes > 0) notifyChange();
       return res.changes > 0;
     },
     remove: (giveawayId, userId) => {
       const res = participantQueries.remove.run(giveawayId, userId);
+      if (res.changes > 0) notifyChange();
       return res.changes > 0;
     },
     count: (giveawayId) => {

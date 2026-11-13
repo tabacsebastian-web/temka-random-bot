@@ -7,6 +7,10 @@ const fairness = require('./fairness');
 
 const bot = new Bot(config.BOT_TOKEN);
 
+bot.catch((err) => {
+  console.error('[Bot] Handler error:', err);
+});
+
 // User context middleware
 bot.use(async (ctx, next) => {
   if (ctx.from) {
