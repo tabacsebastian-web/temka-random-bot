@@ -97,4 +97,91 @@ assert(db.participants.isParticipating(testGid, 111) === false, 'Participant no 
 assert(changeNotifications > changesBeforeRemove, 'onChange must fire on participant remove');
 
 console.log('✅ Database layer verified successfully!');
-console.log('🎉 All unit tests passed!');
+
+// 4. Test Cloudflare D1 async adapter & bot-core factory
+const { createD1Database } = require('./src/db-d1');
+const { createBot } = require('./src/bot-core');
+
+const sqliteAsD1 = {
+  prepare(sql) {
+    let bound = [];
+    return {
+      bind(...args) {
+        bound = args;
+        return this;
+      },
+      async first() {
+        return db.db.prepare(sql).get(...bound) || null;
+      },
+      async all() {
+        return { results: db.db.prepare(sql).all(...bound) };
+      },
+      async run() {
+        const res = db.db.prepare(sql).run(...bound);
+        return { meta: { changes: res.changes, last_row_id: res.lastInsertRowid } };
+      }
+    };
+  }
+};
+
+(async () => {
+  const d1Db = createD1Database(sqliteAsD1, 'en');
+  assert(await d1Db.ping() === true, 'D1 ping succeeds');
+
+  await d1Db.users.upsert(888888, 'd1_tester', 'D1Tester', 'ru');
+  const d1User = await d1Db.users.get(888888);
+  assert(d1User && d1User.username === 'd1_tester', 'D1 user upsert/get works');
+  await d1Db.users.setLang(888888, 'en');
+  assert((await d1Db.users.get(888888)).lang === 'en', 'D1 setLang works');
+
+  const d1PubId = `d1_pub_${Date.now()}`;
+  const d1Gid = await d1Db.giveaways.create({
+    public_id: d1PubId,
+    creator_id: 888888,
+    prize: 'D1 Test Prize',
+    description: 'Testing D1',
+    winners_count: 1,
+    required_channels: [{ id: -100777, title: 'D1 Chan', username: 'd1chan' }],
+    status: 'active',
+    end_type: 'time',
+    end_at: Date.now() - 1000,
+    seed_hash: seedHash,
+    server_seed: serverSeed
+  });
+  assert(d1Gid > 0, 'D1 giveaway inserted');
+  await d1Db.giveaways.updatePostDetails(d1Gid, -100777, 99);
+
+  assert(await d1Db.participants.add(d1Gid, 701, 'p1', 'One') === true, 'D1 participant add works');
+  assert(await d1Db.participants.add(d1Gid, 701, 'p1', 'One') === false, 'D1 participant duplicate ignored');
+  assert(await d1Db.participants.count(d1Gid) === 1, 'D1 participant count matches');
+  assert(await d1Db.participants.isParticipating(d1Gid, 701) === true, 'D1 isParticipating matches');
+
+  const due = await d1Db.giveaways.getActiveToFinish(Date.now());
+  assert(due.some((item) => item.id === d1Gid), 'D1 getActiveToFinish detects due giveaway');
+
+  assert(await d1Db.giveaways.claimForFinish(d1Gid) === true, 'D1 claimForFinish acquires lock');
+  assert(await d1Db.giveaways.claimForFinish(d1Gid) === false, 'D1 claimForFinish prevents double finish');
+  await d1Db.giveaways.releaseFinishClaim(d1Gid);
+  assert((await d1Db.giveaways.getById(d1Gid)).status === 'active', 'D1 releaseFinishClaim restores active');
+  await d1Db.giveaways.finish(d1Gid, serverSeed, [{ user_id: 701, username: 'p1', first_name: 'One' }]);
+  assert((await d1Db.giveaways.getById(d1Gid)).status === 'finished', 'D1 finish marks giveaway finished');
+
+  await d1Db.sessions.set(888888, 'step_prize', { channels: [] });
+  const s = await d1Db.sessions.get(888888);
+  assert(s && s.step === 'step_prize', 'D1 sessions set/get works');
+  await d1Db.sessions.clear(888888);
+  assert((await d1Db.sessions.get(888888)) === null, 'D1 sessions clear works');
+
+  const { bot: cfBot, finalizeDueGiveaways } = createBot({
+    token: '123456:TEST_TOKEN',
+    db: d1Db,
+    defaultLang: 'ru'
+  });
+  assert(cfBot && typeof finalizeDueGiveaways === 'function', 'createBot works with D1 adapter');
+
+  console.log('✅ Cloudflare D1 adapter & bot-core verified successfully!');
+  console.log('🎉 All unit tests passed!');
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

@@ -124,8 +124,12 @@ async function main() {
   if (useWebhook) {
     const fullWebhookUrl = `${webhookBaseUrl}${webhookPath}`;
     await bot.init();
-    webhookReady = await setWebhookWithRetry(fullWebhookUrl, secretToken);
-    console.log(`🔗 Webhook mode configured (${fullWebhookUrl}, ready=${webhookReady})`);
+    if (process.env.FORCE_RENDER_WEBHOOK === 'true') {
+      webhookReady = await setWebhookWithRetry(fullWebhookUrl, secretToken);
+      console.log(`🔗 Webhook mode configured (${fullWebhookUrl}, ready=${webhookReady})`);
+    } else {
+      console.log('⏭️  Skipping automatic setWebhook (Cloudflare Worker is primary webhook host; set FORCE_RENDER_WEBHOOK=true to override)');
+    }
   } else {
     await bot.api.deleteWebhook({ drop_pending_updates: false });
     runner = run(bot);

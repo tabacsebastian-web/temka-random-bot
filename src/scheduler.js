@@ -1,5 +1,4 @@
-const db = require('./db');
-const { finalizeGiveaway } = require('./bot');
+const { finalizeDueGiveaways } = require('./bot');
 
 let timer = null;
 let isChecking = false;
@@ -8,11 +7,7 @@ async function runSchedulerCheck() {
   if (isChecking) return;
   isChecking = true;
   try {
-    const dueGiveaways = db.giveaways.getActiveToFinish();
-    for (const g of dueGiveaways) {
-      console.log(`[Scheduler] Finalizing giveaway #${g.id} (${g.prize})...`);
-      await finalizeGiveaway(g.id);
-    }
+    await finalizeDueGiveaways();
   } catch (err) {
     console.error('[Scheduler] Error checking giveaways:', err);
   } finally {

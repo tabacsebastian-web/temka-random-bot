@@ -4,7 +4,10 @@
   "description": "Secure, provably fair Telegram contest & giveaway bot inspired by Best Random Bot",
   "main": "src/index.js",
   "scripts": {
-    "start": "node --experimental-sqlite src/index.js"
+    "start": "node --experimental-sqlite src/index.js",
+    "test": "node --experimental-sqlite test.js",
+    "dev:cf": "wrangler dev",
+    "deploy:cf": "wrangler deploy"
   },
   "dependencies": {
     "@grammyjs/runner": "^2.0.3",

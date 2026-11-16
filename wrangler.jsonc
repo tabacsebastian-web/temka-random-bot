@@ -1,0 +1,47 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "temka-random-bot",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-11-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.1
+    }
+  },
+  "rules": [
+    {
+      "type": "Text",
+      "globs": ["**/*.html"],
+      "fallthrough": true
+    }
+  ],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/", "/health", "/api/*", "/webhook", "/setup"]
+  },
+  "vars": {
+    "DEFAULT_LANG": "ru",
+    "BOT_USERNAME": "TemkaDrawBot",
+    "BOT_NAME": "Temka Random"
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "temka-random-db",
+      "database_id": "972148c3-2208-4921-ad61-a909fbcdf5f5",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

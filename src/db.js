@@ -278,6 +278,15 @@ module.exports = {
       giveawayQueries.finish.run(serverSeed, JSON.stringify(winners), Date.now(), id);
       notifyChange();
     },
+    claimForFinish: (id) => {
+      const res = db
+        .prepare("UPDATE giveaways SET status = 'finalizing' WHERE id = ? AND status = 'active'")
+        .run(id);
+      return res.changes > 0;
+    },
+    releaseFinishClaim: (id) => {
+      db.prepare("UPDATE giveaways SET status = 'active' WHERE id = ? AND status = 'finalizing'").run(id);
+    },
     listByCreator: (creatorId) => giveawayQueries.listByCreator.all(creatorId)
   },
   participants: {

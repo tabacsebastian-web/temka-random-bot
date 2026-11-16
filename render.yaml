@@ -3,7 +3,7 @@ services:
     name: temka-random-bot
     env: docker
     plan: free
-    autoDeploy: true
+    autoDeploy: false
     healthCheckPath: /
     envVars:
       - key: BOT_TOKEN
