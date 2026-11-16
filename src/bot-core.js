@@ -11,15 +11,21 @@ function getMainMenuKeyboard(lang) {
     .text(t(lang, 'btn_help'), 'menu_help');
 }
 
-function buildUpdatedPostKeyboard(lang, publicId, count) {
-  return new InlineKeyboard()
-    .text(t(lang, 'btn_participate', count), `join_${publicId}`).row()
-    .text(t(lang, 'btn_stats'), `stats_${publicId}`);
+function buildPostActionKeyboard(lang, publicId, count, primaryChannel) {
+  const kb = new InlineKeyboard()
+    .text(t(lang, 'btn_participate', count), `join_${publicId}`).row();
+  const chUrl = primaryChannel?.invite_link || (primaryChannel?.username ? `https://t.me/${primaryChannel.username.replace(/^@/, '')}` : '');
+  if (chUrl) {
+    kb.url(t(lang, 'btn_channels_list'), chUrl);
+  }
+  kb.text(t(lang, 'btn_stats'), `stats_${publicId}`);
+  return kb;
 }
 
 function formatDate(timestamp, lang) {
   const d = new Date(timestamp);
-  return d.toLocaleString(lang === 'ru' ? 'ru-RU' : 'en-US', {
+  const locale = lang === 'ru' ? 'ru-RU' : lang === 'ro' ? 'ro-RO' : 'en-US';
+  return d.toLocaleString(locale, {
     timeZone: 'UTC',
     month: 'short',
     day: 'numeric',
@@ -79,8 +85,14 @@ function parseCustomDate(input) {
 function recoverGiveawayFromMessage(publicId, message) {
   if (!message || !message.text) return null;
   const txt = message.text;
-  const prizeMatch = txt.match(/GIVEAWAY:\s*(.+?)(?:\n|$)/i) || txt.match(/РОЗЫГРЫШ:\s*(.+?)(?:\n|$)/i);
-  const winnersMatch = txt.match(/Winners:\s*(\d+)/i) || txt.match(/Количество победителей:\s*(\d+)/i);
+  const prizeMatch =
+    txt.match(/GIVEAWAY:\s*(.+?)(?:\n|$)/i) ||
+    txt.match(/РОЗЫГРЫШ:\s*(.+?)(?:\n|$)/i) ||
+    txt.match(/CONCURS:\s*(.+?)(?:\n|$)/i);
+  const winnersMatch =
+    txt.match(/Winners:\s*(\d+)/i) ||
+    txt.match(/Количество победителей:\s*(\d+)/i) ||
+    txt.match(/Câștigători:\s*(\d+)/i);
   const hashMatch = txt.match(/([a-f0-9]{64})/);
 
   const prize = prizeMatch ? prizeMatch[1].trim() : 'Giveaway';
@@ -95,7 +107,10 @@ function recoverGiveawayFromMessage(publicId, message) {
   };
 
   let endAt = Date.now() + 3 * 86400000;
-  const endsMatch = txt.match(/Ends:\s*(.+?)(?:\n|$)/i) || txt.match(/Окончание:\s*(.+?)(?:\n|$)/i);
+  const endsMatch =
+    txt.match(/Ends:\s*(.+?)(?:\n|$)/i) ||
+    txt.match(/Окончание:\s*(.+?)(?:\n|$)/i) ||
+    txt.match(/Se încheie:\s*(.+?)(?:\n|$)/i);
   if (endsMatch) {
     const rawDate = endsMatch[1].replace(/UTC/i, '').trim();
     const year = new Date().getUTCFullYear();
@@ -168,9 +183,12 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
     if (ctx.from) {
       let user = await db.users.get(ctx.from.id);
       if (!user) {
-        const userLang = (ctx.from.language_code && ctx.from.language_code.startsWith('ru')) ? 'ru' : 'en';
+        const lc = (ctx.from.language_code || '').toLowerCase();
+        const userLang = lc.startsWith('ru') ? 'ru' : lc.startsWith('ro') ? 'ro' : 'en';
         await db.users.upsert(ctx.from.id, ctx.from.username, ctx.from.first_name, userLang);
-        user = { user_id: ctx.from.id, lang: userLang };
+        user = { user_id: ctx.from.id, lang: userLang, last_active_at: Date.now() };
+      } else if (db.users.touch && (!user.last_active_at || Date.now() - user.last_active_at > 3600000)) {
+        await db.users.touch(ctx.from.id);
       }
       ctx.lang = user.lang || defaultLang;
     } else {
@@ -179,6 +197,30 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
     ctx.t = (key, ...args) => t(ctx.lang, key, ...args);
     await next();
   });
+
+  async function sendWelcomeMenu(ctx) {
+    const name = ctx.from?.first_name || 'Friend';
+    let text = ctx.t('welcome', name);
+    if (db.stats?.getPublicStats) {
+      try {
+        const stats = await db.stats.getPublicStats();
+        text += ctx.t('welcome_stats', stats);
+      } catch (err) {}
+    }
+    await ctx.reply(text, {
+      parse_mode: 'HTML',
+      reply_markup: getMainMenuKeyboard(ctx.lang)
+    });
+  }
+
+  async function startCreateWizard(ctx) {
+    if (!ctx.from) return;
+    await db.sessions.set(ctx.from.id, 'step_prize', { channels: [] });
+    await ctx.reply(ctx.t('wizard_step_prize'), {
+      parse_mode: 'HTML',
+      reply_markup: new InlineKeyboard().text(ctx.t('btn_cancel'), 'wizard_cancel')
+    });
+  }
 
   async function showGiveawayPreview(ctx, session, endAt) {
     const { serverSeed, seedHash } = fairness.generateSeed();
@@ -213,6 +255,9 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
 
   bot.command('start', async (ctx) => {
     const payload = ctx.match;
+    if (payload === 'create') {
+      return startCreateWizard(ctx);
+    }
     if (payload && payload.startsWith('join_')) {
       const publicId = payload.replace('join_', '');
       const g = await db.giveaways.getByPublicId(publicId);
@@ -237,11 +282,7 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
       }
     }
 
-    const name = ctx.from?.first_name || 'Friend';
-    await ctx.reply(ctx.t('welcome', name), {
-      parse_mode: 'HTML',
-      reply_markup: getMainMenuKeyboard(ctx.lang)
-    });
+    await sendWelcomeMenu(ctx);
   });
 
   bot.command('cancel', async (ctx) => {
@@ -260,14 +301,32 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
     });
   });
 
+  bot.command('verify', async (ctx) => {
+    const seed = (ctx.match || '').trim();
+    if (!seed) {
+      return ctx.reply(ctx.t('verify_usage'), {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: getMainMenuKeyboard(ctx.lang)
+      });
+    }
+    const hash = crypto.createHash('sha256').update(seed).digest('hex');
+    const matchedGiveaway = db.giveaways.getBySeedHash ? await db.giveaways.getBySeedHash(hash) : null;
+    await ctx.reply(ctx.t('verify_result', { seed, hash, matchedGiveaway }), {
+      parse_mode: 'HTML',
+      reply_markup: getMainMenuKeyboard(ctx.lang)
+    });
+  });
+
   bot.command(['lang', 'language'], async (ctx) => {
     const kb = new InlineKeyboard()
       .text('🇬🇧 English', 'set_lang_en')
-      .text('🇷🇺 Русский', 'set_lang_ru');
+      .text('🇷🇺 Русский', 'set_lang_ru')
+      .text('🇷🇴 Română', 'set_lang_ro');
     await ctx.reply(ctx.t('choose_lang'), { reply_markup: kb });
   });
 
-  bot.callbackQuery(/^set_lang_(en|ru)$/, async (ctx) => {
+  bot.callbackQuery(/^set_lang_(en|ru|ro)$/, async (ctx) => {
     const chosen = ctx.match[1];
     if (ctx.from) {
       await db.users.setLang(ctx.from.id, chosen);
@@ -291,18 +350,15 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
     await ctx.answerCallbackQuery();
     const kb = new InlineKeyboard()
       .text('🇬🇧 English', 'set_lang_en')
-      .text('🇷🇺 Русский', 'set_lang_ru').row()
+      .text('🇷🇺 Русский', 'set_lang_ru')
+      .text('🇷🇴 Română', 'set_lang_ro').row()
       .text('🔙 Back', 'menu_back');
     await ctx.reply(ctx.t('choose_lang'), { reply_markup: kb });
   });
 
   bot.callbackQuery('menu_back', async (ctx) => {
     await ctx.answerCallbackQuery();
-    const name = ctx.from?.first_name || 'Friend';
-    await ctx.reply(ctx.t('welcome', name), {
-      parse_mode: 'HTML',
-      reply_markup: getMainMenuKeyboard(ctx.lang)
-    });
+    await sendWelcomeMenu(ctx);
   });
 
   bot.callbackQuery('menu_my', async (ctx) => {
@@ -330,13 +386,7 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
 
   bot.callbackQuery('menu_create', async (ctx) => {
     await ctx.answerCallbackQuery();
-    if (!ctx.from) return;
-
-    await db.sessions.set(ctx.from.id, 'step_prize', { channels: [] });
-    await ctx.reply(ctx.t('wizard_step_prize'), {
-      parse_mode: 'HTML',
-      reply_markup: new InlineKeyboard().text(ctx.t('btn_cancel'), 'wizard_cancel')
-    });
+    await startCreateWizard(ctx);
   });
 
   bot.callbackQuery('wizard_cancel', async (ctx) => {
@@ -610,10 +660,7 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
       seedHash: d.seed_hash
     });
 
-    const postKb = new InlineKeyboard()
-      .text(ctx.t('btn_participate', 0), `join_${d.public_id}`).row()
-      .url(ctx.t('btn_channels_list'), `https://t.me/${targetChannel.username}`)
-      .text(ctx.t('btn_stats'), `stats_${d.public_id}`);
+    const postKb = buildPostActionKeyboard(ctx.lang, d.public_id, 0, targetChannel);
 
     try {
       const sentMsg = await ctx.api.sendMessage(targetChannel.id, postText, {
@@ -665,7 +712,7 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
 
       try {
         await ctx.editMessageReplyMarkup({
-          reply_markup: buildUpdatedPostKeyboard(ctx.lang, g.public_id, newCount)
+          reply_markup: buildPostActionKeyboard(ctx.lang, g.public_id, newCount, g.required_channels?.[0])
         });
       } catch (err) {}
       return;
@@ -693,7 +740,7 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
 
     try {
       await ctx.editMessageReplyMarkup({
-        reply_markup: buildUpdatedPostKeyboard(ctx.lang, g.public_id, newCount)
+        reply_markup: buildPostActionKeyboard(ctx.lang, g.public_id, newCount, g.required_channels?.[0])
       });
     } catch (err) {}
   });
@@ -784,10 +831,14 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
         finishedAtFormatted: formatDate(Date.now(), defaultLang)
       });
 
+      const finishKb = new InlineKeyboard()
+        .url(t(defaultLang, 'btn_create_own'), 'https://t.me/TemkaDrawBot?start=create');
+
       try {
         if (g.channel_post_chat_id && g.channel_post_message_id) {
           await bot.api.editMessageText(g.channel_post_chat_id, g.channel_post_message_id, finishCard, {
             parse_mode: 'HTML',
+            reply_markup: finishKb,
             disable_web_page_preview: true
           });
 
@@ -796,6 +847,7 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
             `🎉 <b>Congratulations to the winners of ${g.prize}!</b>\n\n${winnersText}`,
             {
               parse_mode: 'HTML',
+              reply_markup: finishKb,
               reply_to_message_id: g.channel_post_message_id
             }
           );

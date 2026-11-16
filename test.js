@@ -27,10 +27,17 @@ const winnersRecheck = fairness.selectWinners(serverSeed, mockParticipants, 2);
 assert(winners[0].user_id === winnersRecheck[0].user_id, 'Draw must be 100% reproducible');
 console.log('✅ Provably Fair algorithm verified successfully!');
 
-// 2. Test i18n
+// 2. Test i18n (EN / RU / RO) & Profile metadata limits
 assert(t('en', 'btn_create_giveaway') === '➕ Create Giveaway');
 assert(t('ru', 'btn_create_giveaway') === '➕ Создать розыгрыш');
-console.log('✅ i18n dictionary verified successfully!');
+assert(t('ro', 'btn_create_giveaway') === '➕ Creează Giveaway');
+const { PROFILE_TEXTS } = require('./src/profile');
+for (const [langKey, cfg] of Object.entries(PROFILE_TEXTS)) {
+  assert(cfg.short_description.length <= 120, `short_description too long for ${langKey || 'default'}`);
+  assert(cfg.description.length <= 512, `description too long for ${langKey || 'default'}`);
+  assert(Array.isArray(cfg.commands) && cfg.commands.length >= 3, `commands missing for ${langKey || 'default'}`);
+}
+console.log('✅ i18n & Telegram profile limits verified successfully!');
 
 // 3. Test Database + State Export/Import & Change Hooks
 let changeNotifications = 0;
@@ -135,6 +142,7 @@ const sqliteAsD1 = {
   assert((await d1Db.users.get(888888)).lang === 'en', 'D1 setLang works');
 
   const d1PubId = `d1_pub_${Date.now()}`;
+  const d1SeedPair = fairness.generateSeed();
   const d1Gid = await d1Db.giveaways.create({
     public_id: d1PubId,
     creator_id: 888888,
@@ -145,11 +153,19 @@ const sqliteAsD1 = {
     status: 'active',
     end_type: 'time',
     end_at: Date.now() - 1000,
-    seed_hash: seedHash,
-    server_seed: serverSeed
+    seed_hash: d1SeedPair.seedHash,
+    server_seed: d1SeedPair.serverSeed
   });
   assert(d1Gid > 0, 'D1 giveaway inserted');
+  const byHash = await d1Db.giveaways.getBySeedHash(d1SeedPair.seedHash);
+  assert(byHash && byHash.public_id === d1PubId, 'D1 getBySeedHash works');
   await d1Db.giveaways.updatePostDetails(d1Gid, -100777, 99);
+
+  await d1Db.users.touch(888888);
+  const d1Stats = await d1Db.stats.getPublicStats();
+  assert(d1Stats.activeUsers30d >= 1 && d1Stats.totalGiveaways >= 1, 'D1 public stats work');
+  const nodeStats = db.stats.getPublicStats();
+  assert(nodeStats.activeUsers30d >= 1 && nodeStats.totalGiveaways >= 1, 'Node SQLite public stats work');
 
   assert(await d1Db.participants.add(d1Gid, 701, 'p1', 'One') === true, 'D1 participant add works');
   assert(await d1Db.participants.add(d1Gid, 701, 'p1', 'One') === false, 'D1 participant duplicate ignored');

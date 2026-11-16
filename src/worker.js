@@ -1,12 +1,14 @@
 import { webhookCallback } from 'grammy';
 import botCorePkg from './bot-core.js';
 import d1Pkg from './db-d1.js';
+import profilePkg from './profile.js';
 import indexHtml from '../public/index.html';
 
 const { createBot } = botCorePkg;
 const { createD1Database } = d1Pkg;
+const { syncBotProfile } = profilePkg;
 
-const VERSION = '3.0.0-cloudflare';
+const VERSION = '3.1.0-cloudflare';
 const botInfoCache = new Map();
 
 function logInfo(event, details = {}) {
@@ -86,11 +88,13 @@ async function ensureBotInitialized(env, bot) {
 
 async function buildHealthResponse(env) {
   let d1Status = 'missing';
+  let stats = { activeUsers30d: 0, totalGiveaways: 0, totalParticipants: 0 };
   if (env.DB) {
     try {
       const db = createD1Database(env.DB, env.DEFAULT_LANG || 'ru');
       await db.ping();
       d1Status = 'connected';
+      stats = await db.stats.getPublicStats();
     } catch (err) {
       d1Status = 'error';
     }
@@ -104,6 +108,7 @@ async function buildHealthResponse(env) {
     mode: 'webhook',
     d1: d1Status,
     configured: Boolean(env.BOT_TOKEN),
+    stats,
     time: new Date().toISOString()
   });
 }
@@ -151,9 +156,10 @@ export default {
         secret_token: secretToken,
         drop_pending_updates: false
       });
+      const profileSynced = await syncBotProfile(bot.api);
 
-      logInfo('webhook_registered', { webhookUrl });
-      return Response.json({ ok: true, webhookUrl });
+      logInfo('webhook_registered', { webhookUrl, profileSynced });
+      return Response.json({ ok: true, webhookUrl, profileSynced });
     }
 
     if (path === '/health' || path === '/api/status') {

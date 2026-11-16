@@ -21,7 +21,8 @@ db.exec(`
     username TEXT,
     first_name TEXT,
     lang TEXT DEFAULT 'ru',
-    created_at INTEGER
+    created_at INTEGER,
+    last_active_at INTEGER
   );
 
   CREATE TABLE IF NOT EXISTS giveaways (
@@ -66,17 +67,25 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_participants_giveaway ON participants(giveaway_id);
 `);
 
+// Ensure last_active_at exists on existing SQLite databases
+const userCols = db.prepare('PRAGMA table_info(users)').all();
+if (!userCols.some((c) => c.name === 'last_active_at')) {
+  db.exec('ALTER TABLE users ADD COLUMN last_active_at INTEGER');
+}
+
 // Prepared statement helpers
 const userQueries = {
   get: db.prepare('SELECT * FROM users WHERE user_id = ?'),
   upsert: db.prepare(`
-    INSERT INTO users (user_id, username, first_name, lang, created_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO users (user_id, username, first_name, lang, created_at, last_active_at)
+    VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(user_id) DO UPDATE SET
       username = excluded.username,
-      first_name = excluded.first_name
+      first_name = excluded.first_name,
+      last_active_at = excluded.last_active_at
   `),
-  setLang: db.prepare('UPDATE users SET lang = ? WHERE user_id = ?')
+  touch: db.prepare('UPDATE users SET last_active_at = ? WHERE user_id = ?'),
+  setLang: db.prepare('UPDATE users SET lang = ?, last_active_at = ? WHERE user_id = ?')
 };
 
 const giveawayQueries = {
@@ -209,14 +218,39 @@ module.exports = {
   users: {
     get: (id) => userQueries.get.get(id),
     upsert: (id, username, firstName, lang = config.DEFAULT_LANG) => {
-      const res = userQueries.upsert.run(id, username || null, firstName || '', lang, Date.now());
+      const now = Date.now();
+      const res = userQueries.upsert.run(id, username || null, firstName || '', lang, now, now);
       notifyChange();
       return res;
     },
+    touch: (id) => {
+      return userQueries.touch.run(Date.now(), id);
+    },
     setLang: (id, lang) => {
-      const res = userQueries.setLang.run(lang, id);
+      const res = userQueries.setLang.run(lang, Date.now(), id);
       notifyChange();
       return res;
+    }
+  },
+  stats: {
+    getPublicStats: () => {
+      const since = Date.now() - 30 * 86400000;
+      const activeRow = db.prepare(`
+        SELECT COUNT(*) AS cnt FROM (
+          SELECT user_id AS uid FROM users WHERE COALESCE(last_active_at, created_at, 0) >= ?
+          UNION
+          SELECT user_id AS uid FROM participants WHERE joined_at >= ?
+          UNION
+          SELECT creator_id AS uid FROM giveaways WHERE created_at >= ? AND creator_id > 0
+        )
+      `).get(since, since, since);
+      const giveawaysRow = db.prepare('SELECT COUNT(*) AS cnt FROM giveaways').get();
+      const participantsRow = db.prepare('SELECT COUNT(*) AS cnt FROM participants').get();
+      return {
+        activeUsers30d: Number(activeRow?.cnt || 0),
+        totalGiveaways: Number(giveawaysRow?.cnt || 0),
+        totalParticipants: Number(participantsRow?.cnt || 0)
+      };
     }
   },
   giveaways: {
@@ -255,6 +289,13 @@ module.exports = {
         g.required_channels = JSON.parse(g.required_channels);
       }
       return g;
+    },
+    getBySeedHash: (seedHash) => {
+      const g = db.prepare('SELECT * FROM giveaways WHERE seed_hash = ? LIMIT 1').get(seedHash);
+      if (g && g.required_channels) {
+        g.required_channels = JSON.parse(g.required_channels);
+      }
+      return g || null;
     },
     getById: (id) => {
       const g = giveawayQueries.getById.get(id);

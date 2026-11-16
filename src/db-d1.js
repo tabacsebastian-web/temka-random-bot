@@ -22,16 +22,45 @@ function createD1Database(d1, defaultLang = 'ru') {
         return d1.prepare('SELECT * FROM users WHERE user_id = ?').bind(id).first();
       },
       upsert: async (id, username, firstName, lang = defaultLang) => {
+        const now = Date.now();
         return d1.prepare(`
-          INSERT INTO users (user_id, username, first_name, lang, created_at)
-          VALUES (?, ?, ?, ?, ?)
+          INSERT INTO users (user_id, username, first_name, lang, created_at, last_active_at)
+          VALUES (?, ?, ?, ?, ?, ?)
           ON CONFLICT(user_id) DO UPDATE SET
             username = excluded.username,
-            first_name = excluded.first_name
-        `).bind(id, username || null, firstName || '', lang, Date.now()).run();
+            first_name = excluded.first_name,
+            last_active_at = excluded.last_active_at
+        `).bind(id, username || null, firstName || '', lang, now, now).run();
+      },
+      touch: async (id) => {
+        return d1.prepare('UPDATE users SET last_active_at = ? WHERE user_id = ?').bind(Date.now(), id).run();
       },
       setLang: async (id, lang) => {
-        return d1.prepare('UPDATE users SET lang = ? WHERE user_id = ?').bind(lang, id).run();
+        return d1.prepare('UPDATE users SET lang = ?, last_active_at = ? WHERE user_id = ?').bind(lang, Date.now(), id).run();
+      }
+    },
+
+    stats: {
+      getPublicStats: async () => {
+        const since = Date.now() - 30 * 86400000;
+        const [activeRow, giveawaysRow, participantsRow] = await Promise.all([
+          d1.prepare(`
+            SELECT COUNT(*) AS cnt FROM (
+              SELECT user_id AS uid FROM users WHERE COALESCE(last_active_at, created_at, 0) >= ?
+              UNION
+              SELECT user_id AS uid FROM participants WHERE joined_at >= ?
+              UNION
+              SELECT creator_id AS uid FROM giveaways WHERE created_at >= ? AND creator_id > 0
+            )
+          `).bind(since, since, since).first(),
+          d1.prepare('SELECT COUNT(*) AS cnt FROM giveaways').first(),
+          d1.prepare('SELECT COUNT(*) AS cnt FROM participants').first()
+        ]);
+        return {
+          activeUsers30d: Number(activeRow?.cnt || 0),
+          totalGiveaways: Number(giveawaysRow?.cnt || 0),
+          totalParticipants: Number(participantsRow?.cnt || 0)
+        };
       }
     },
 
@@ -66,6 +95,11 @@ function createD1Database(d1, defaultLang = 'ru') {
 
       getByPublicId: async (publicId) => {
         const row = await d1.prepare('SELECT * FROM giveaways WHERE public_id = ?').bind(publicId).first();
+        return parseGiveawayRow(row);
+      },
+
+      getBySeedHash: async (seedHash) => {
+        const row = await d1.prepare('SELECT * FROM giveaways WHERE seed_hash = ? LIMIT 1').bind(seedHash).first();
         return parseGiveawayRow(row);
       },
 
