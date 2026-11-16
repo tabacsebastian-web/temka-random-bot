@@ -2,69 +2,69 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Un bot de Telegram open-source, securizat, rapid și multilingv (**EN / RU / RO**) pentru organizarea concursurilor și giveaway-urilor în canale și grupuri Telegram, construit pe **Cloudflare Workers & D1** și algoritm **Provably Fair (SHA-256 + HMAC-SHA256)**.
+An open-source, secure, and provably fair Telegram giveaway bot for channels and groups (**English** primary, **Russian** second language), powered by **Cloudflare Workers & D1** and **SHA-256 / HMAC-SHA256** winner selection.
 
-- 🤖 **Bot Live:** [@TemkaDrawBot](https://t.me/TemkaDrawBot)
-- 🌐 **Status & Verificator Online SHA-256:** [https://temka-random-bot.tabac-sebastian.workers.dev](https://temka-random-bot.tabac-sebastian.workers.dev)
-
----
-
-## 🛡️ De ce are încredere comunitatea în Temka Random
-
-1. **Provably Fair (Criptografic verificabil):**
-   - La crearea concursului se generează un seed secret de 256 de biți (`server_seed`) și se publică `SHA-256(server_seed)` înainte de start.
-   - La finalizare, `server_seed` este dezvăluit public — oricine poate verifica autenticitatea folosind comanda `/verify <seed>` în bot sau direct în browser pe [pagina web](https://temka-random-bot.tabac-sebastian.workers.dev/#verify).
-2. **Verificare dublă anti-cheat:**
-   - Botul verifică abonarea la toate canalele obligatorii atât la apăsarea butonului de participare, cât și în momentul extragerii câștigătorilor (dezabonații sunt descalificați automat).
-3. **24/7 pe Cloudflare Workers + D1:**
-   - Webhook instant cu răspuns sub ~150 ms, bază de date persistentă **Cloudflare D1** și **Cron Trigger** nativ din minut în minut pentru finalizarea automată a concursurilor.
-4. **Multilingv nativ (English / Русский / Română):**
-   - Detectare automată a limbii utilizatorului + comutare rapidă prin `/lang`.
+- 🤖 **Live Bot:** [@TemkaDrawBot](https://t.me/TemkaDrawBot)
+- 🌐 **Status & Online SHA-256 Verifier:** [https://temka-random-bot.tabac-sebastian.workers.dev](https://temka-random-bot.tabac-sebastian.workers.dev)
 
 ---
 
-## 📁 Structura Proiectului
+## 🛡️ Why Channel Admins Trust Temka Random
+
+1. **Provably Fair (Cryptographically Verifiable):**
+   - A 256-bit secret `server_seed` is generated when creating a giveaway, and its `SHA-256(server_seed)` hash is published upfront before anyone joins.
+   - When the draw finishes, `server_seed` is revealed publicly — anyone can verify fairness using `/verify <seed>` in Telegram or in the browser via the [online verifier](https://temka-random-bot.tabac-sebastian.workers.dev/#verify).
+2. **Double Anti-Cheat Subscription Check:**
+   - Required channel subscriptions are checked both when a user clicks Participate and again at draw time (unsubscribed finalists are automatically skipped and replaced).
+3. **Always-On 24/7 Serverless Edge (Cloudflare Workers + D1):**
+   - Sub-150ms webhook handling, persistent **Cloudflare D1** database, and a minute-level **Cron Trigger** so draws never depend on a local machine and never miss a deadline.
+4. **Bilingual Interface (English Primary + Russian):**
+   - English by default across profiles, channel posts, commands, and onboarding, with Russian (`RU`) available as a second language via `/lang`.
+
+---
+
+## 📁 Project Structure
 
 ```text
 temka-random-bot/
 ├── migrations/
-│   ├── 0001_init.sql         # Schema inițială Cloudflare D1
-│   └── 0002_last_active.sql  # Coloană last_active_at pentru MAU (utilizatori activi lunar)
+│   ├── 0001_init.sql         # Initial Cloudflare D1 schema (default lang = 'en')
+│   └── 0002_last_active.sql  # last_active_at column for 30-day active users (MAU)
 ├── public/
-│   └── index.html            # Pagina web de status + Verificator interactiv SHA-256
+│   └── index.html            # Public status page & browser SHA-256 Seed Verifier
 ├── src/
-│   ├── bot-core.js           # Logica completă a botului (grammY, compatibilă D1 & Node)
-│   ├── bot.js                # Adaptor Node.js pentru rulare locală
-│   ├── config.js             # Configurații & variabile de mediu
-│   ├── db-d1.js              # Adaptor async pentru Cloudflare D1
-│   ├── db.js                 # Adaptor SQLite pentru Node.js + backup hooks
-│   ├── fairness.js           # Algoritm Provably Fair (HMAC-SHA256 + rejection sampling)
-│   ├── i18n.js               # Traduceri complete EN / RU / RO
-│   ├── index.js              # Server HTTP / webhook opțional pentru Node.js
-│   ├── profile.js            # Sincronizare descrieri, About și comenzi pe Telegram API
-│   ├── scheduler.js          # Scheduler Node.js
-│   └── worker.js             # Entrypoint Cloudflare Worker (fetch + cron scheduled)
-├── LICENSE                   # Licență MIT
+│   ├── bot-core.js           # Core bot workflows (grammY, compatible with D1 & Node)
+│   ├── bot.js                # Optional Node.js local adapter
+│   ├── config.js             # Environment configuration (DEFAULT_LANG=en)
+│   ├── db-d1.js              # Async Cloudflare D1 database adapter
+│   ├── db.js                 # Node.js SQLite database adapter + backup hooks
+│   ├── fairness.js           # Provably Fair algorithm (HMAC-SHA256 + rejection sampling)
+│   ├── i18n.js               # English (primary) & Russian translations
+│   ├── index.js              # Optional Node.js HTTP / webhook server
+│   ├── profile.js            # Syncs Telegram descriptions & commands via Bot API
+│   ├── scheduler.js          # Node.js fallback scheduler
+│   └── worker.js             # Cloudflare Worker entrypoint (fetch + cron scheduled)
+├── LICENSE                   # MIT License
 ├── package.json
-├── test.js                   # Teste unitare (fairness, i18n, SQLite, D1, profil)
-└── wrangler.jsonc            # Configurare Cloudflare Workers & D1
+├── test.js                   # Unit tests (fairness, i18n, SQLite, D1, profile)
+└── wrangler.jsonc            # Cloudflare Workers & D1 configuration
 ```
 
 ---
 
-## 🚀 Dezvoltare locală & Deploy pe Cloudflare
+## 🚀 Local Development & Cloudflare Deployment
 
 ```bash
-npm test                                    # Rulează testele unitare
+npm test                                    # Run unit tests
 npx wrangler d1 migrations apply temka-random-db --local
-npm run dev:cf                              # Pornește local Cloudflare Worker + D1
-npm run deploy:cf                           # Deploy pe Cloudflare Workers & Pages
+npm run dev:cf                              # Run Cloudflare Worker + D1 locally
+npm run deploy:cf                           # Deploy to Cloudflare Workers
 ```
 
-După deploy, un request `POST /setup` semnat cu header-ul `X-Telegram-Bot-Api-Secret-Token` înregistrează webhook-ul și sincronizează automat profilul multilingv (`setMyShortDescription`, `setMyDescription`, `setMyCommands`).
+After deploying, send a signed `POST /setup` request with header `X-Telegram-Bot-Api-Secret-Token` to register the Telegram webhook and sync bot profile descriptions and commands (`default`/EN and `ru`).
 
 ---
 
-## 📄 Licență
+## 📄 License
 
-Publicat sub [Licența MIT](LICENSE). Poți folosi, audita și extinde proiectul liber.
+Released under the [MIT License](LICENSE).

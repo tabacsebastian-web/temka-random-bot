@@ -11,7 +11,7 @@ const strings = {
       `• 🎟️ Total entries: <b>${totalParticipants}</b>`,
     btn_create_giveaway: '➕ Create Giveaway',
     btn_my_giveaways: '📋 My Giveaways',
-    btn_language: '🌐 Language / Язык / Limbă',
+    btn_language: '🌐 Language / Язык',
     btn_help: 'ℹ️ About & Security',
 
     help_text:
@@ -20,7 +20,7 @@ const strings = {
       `2. <b>Double-Check Verification:</b> At draw time, the bot re-verifies if winners are still subscribed. Anyone who unsubscribes after clicking is disqualified.\n` +
       `3. <b>Always On 24/7:</b> Powered by Cloudflare Workers & D1 so giveaways never pause and results always publish on time.`,
 
-    choose_lang: '🌐 Please choose your language / Выберите язык / Alege limba:',
+    choose_lang: '🌐 Please choose your language / Выберите язык:',
     lang_set: '✅ Language changed to English!',
 
     // Wizard steps
@@ -150,7 +150,7 @@ const strings = {
       `• 🎟️ Всего участий: <b>${totalParticipants}</b>`,
     btn_create_giveaway: '➕ Создать розыгрыш',
     btn_my_giveaways: '📋 Мои розыгрыши',
-    btn_language: '🌐 Язык / Language / Limbă',
+    btn_language: '🌐 Язык / Language',
     btn_help: 'ℹ️ О боте и безопасности',
 
     help_text:
@@ -159,7 +159,7 @@ const strings = {
       `2. <b>Двойная проверка подписки:</b> В момент розыгрыша бот повторно проверяет подписку финалистов. Отписавшиеся автоматически дисквалифицируются.\n` +
       `3. <b>Работает 24/7:</b> Запущен на Cloudflare Workers & D1 — итоги всегда публикуются точно в срок.`,
 
-    choose_lang: '🌐 Пожалуйста, выберите язык / Choose language / Alege limba:',
+    choose_lang: '🌐 Пожалуйста, выберите язык / Choose language:',
     lang_set: '✅ Язык успешно изменён на Русский!',
 
     // Wizard steps
@@ -275,145 +275,6 @@ const strings = {
     no_participants: '😢 В розыгрыше не было участников.',
     my_giveaways_empty: 'Вы ещё не создали ни одного розыгрыша. Нажмите «Создать розыгрыш», чтобы начать!',
     my_giveaways_title: '📋 <b>Ваши розыгрыши:</b>'
-  },
-
-  ro: {
-    welcome: (name) =>
-      `👋 Salut, <b>${name}</b>!\n\n` +
-      `🎁 Bine ai venit la <b>Temka Random</b> — botul transparent și verificabil criptografic (Provably Fair) pentru concursuri și giveaway-uri pe Telegram.\n\n` +
-      `Lansează un concurs în 30 de secunde sau alege o opțiune mai jos:`,
-    welcome_stats: ({ activeUsers30d, totalGiveaways, totalParticipants }) =>
-      `\n\n📊 <b>Statistici live:</b>\n` +
-      `• 👥 Utilizatori activi lunar: <b>${activeUsers30d}</b>\n` +
-      `• 🎁 Giveaway-uri organizate: <b>${totalGiveaways}</b>\n` +
-      `• 🎟️ Participări totale: <b>${totalParticipants}</b>`,
-    btn_create_giveaway: '➕ Creează Giveaway',
-    btn_my_giveaways: '📋 Giveaway-urile mele',
-    btn_language: '🌐 Limbă / Language / Язык',
-    btn_help: 'ℹ️ Despre & Securitate',
-
-    help_text:
-      `🛡️ <b>De ce este Temka Random 100% corect?</b>\n\n` +
-      `1. <b>Provably Fair (SHA-256 + HMAC):</b> Înainte ca giveaway-ul să înceapă, se publică hash-ul SHA-256 al seed-ului secret. La final, seed-ul este dezvăluit și oricine îl poate verifica cu <code>/verify &lt;seed&gt;</code> sau online.\n` +
-      `2. <b>Verificare dublă a abonării:</b> Botul verifică abonamentul atât la înscriere, cât și în momentul extragerii. Cine se dezabonează este descalificat automat.\n` +
-      `3. <b>Activ 24/7 pe Cloudflare:</b> Rulează permanent pe Cloudflare Workers & D1 și extrage câștigătorii la timp exact.`,
-
-    choose_lang: '🌐 Alege limba / Choose language / Выберите язык:',
-    lang_set: '✅ Limba a fost schimbată în Română!',
-
-    // Wizard steps
-    wizard_step_prize:
-      `🎁 <b>Pasul 1/5: Premiul</b>\n\n` +
-      `Trimite titlul sau premiul concursului (ex: <i>Telegram Premium 1 An</i> sau <i>100 USDT</i>):`,
-    wizard_step_description:
-      `📝 <b>Pasul 2/5: Detalii suplimentare</b>\n\n` +
-      `Trimite o descriere sau reguli opționale pentru concurs, sau trimite /skip pentru a sări peste acest pas:`,
-    wizard_step_winners:
-      `👥 <b>Pasul 3/5: Număr de câștigători</b>\n\n` +
-      `Câți câștigători să fie aleși? Introdu un număr între 1 și 100:`,
-    wizard_invalid_winners: '⚠️ Te rog introdu un număr valid între 1 și 100.',
-    wizard_step_channels:
-      `📢 <b>Pasul 4/5: Canale obligatorii</b>\n\n` +
-      `Trimite username-ul canalului (ex: <code>@canalulmeu</code>) sau redirecționează (forward) un mesaj din canal.\n\n` +
-      `⚠️ <b>Important:</b> Botul @TemkaDrawBot trebuie să fie <b>Administrator</b> în acel canal (cu drept de postare și invitații)!\n\n` +
-      `<i>Poți adăuga mai multe canale pe rând. Când ești gata, apasă „Gata”.</i>`,
-    btn_done_channels: '✅ Gata (canalele au fost adăugate)',
-    channel_added: (title, handle) => `✅ Canalul <b>${title}</b> (${handle}) a fost adăugat! Mai adaugă unul sau apasă „Gata”.`,
-    channel_error_not_admin: (username) =>
-      `❌ Nu am putut confirma drepturile de administrator în ${username}. Verifică dacă @TemkaDrawBot este administrator în canal și încearcă din nou.`,
-    need_at_least_one_channel: '⚠️ Adaugă cel puțin un canal înainte de a continua.',
-
-    wizard_step_duration:
-      `⏳ <b>Pasul 5/5: Durata concursului</b>\n\n` +
-      `Alege cât timp va fi activ giveaway-ul:`,
-    btn_1_hour: '1 Oră',
-    btn_6_hours: '6 Ore',
-    btn_24_hours: '24 Ore',
-    btn_3_days: '3 Zile',
-    btn_7_days: '7 Zile',
-    btn_custom_date: '📅 Dată și oră exactă',
-    wizard_step_custom_date:
-      `📅 <b>Data și ora exactă de încheiere</b>\n\n` +
-      `Trimite data și ora când trebuie să se termine concursul.\n\n` +
-      `Format: <code>ZZ.LL.AAAA OO:MM</code> (ex: <code>25.11.2026 18:00</code> UTC) sau <code>ZZ.LL OO:MM</code> (ex: <code>25.11 18:00</code>):`,
-    wizard_invalid_date: '⚠️ Format invalid. Trimite în format: <code>ZZ.LL.AAAA OO:MM</code> (ex: <code>25.11.2026 18:00</code>)',
-    wizard_date_in_past: '⚠️ Data de finalizare trebuie să fie în viitor!',
-
-    wizard_preview_title: '👀 <b>Previzualizare Giveaway</b>\n\nVerifică detaliile înainte de publicare:',
-    btn_publish_to_channel: '🚀 Publică în canal',
-    btn_cancel: '❌ Anulează',
-    session_expired: '⚠️ Sesiunea a expirat. Trimite /start pentru a crea un giveaway nou.',
-    cancelled: '❌ Crearea giveaway-ului a fost anulată.',
-
-    // Giveaway Post Content
-    giveaway_card: ({ prize, description, winnersCount, channels, endAtFormatted, seedHash }) => {
-      let text = `🎁 <b>CONCURS: ${prize}</b>\n\n`;
-      if (description) {
-        text += `${description}\n\n`;
-      }
-      text += `🏆 <b>Câștigători:</b> ${winnersCount}\n`;
-      text += `📢 <b>Canale necesare:</b>\n`;
-      channels.forEach((ch, idx) => {
-        const link = ch.invite_link || (ch.username ? `https://t.me/${ch.username}` : '');
-        const tag = ch.username ? ` (@${ch.username})` : '';
-        if (link) {
-          text += `  ${idx + 1}. <a href="${link}">${ch.title}</a>${tag}\n`;
-        } else {
-          text += `  ${idx + 1}. <b>${ch.title}</b>${tag}\n`;
-        }
-      });
-      text += `\n⏳ <b>Se încheie:</b> ${endAtFormatted}\n`;
-      text += `🔒 <b>Hash corectitudine (SHA-256):</b>\n<code>${seedHash}</code>\n\n`;
-      text += `<i>Apasă butonul de mai jos pentru a participa!</i>\n`;
-      text += `🤖 <a href="https://t.me/TemkaDrawBot">@TemkaDrawBot</a> · Provably Fair`;
-      return text;
-    },
-
-    btn_participate: (count) => `🎁 Participă (${count})`,
-    btn_channels_list: '📢 Canale',
-    btn_stats: '📊 Statistici',
-    btn_create_own: '🎁 Creează propriul giveaway',
-
-    // Callback responses
-    alert_already_participating: '✅ Participi deja la acest giveaway! Succes!',
-    alert_left_giveaway: '👋 Ai ieșit din giveaway și nu mai participi.\n\n(Apasă din nou Participă dacă te răzgândești!)',
-    alert_success_joined: '🎉 Te-ai înscris cu succes în giveaway!\n\n💡 Sfat: Deschide @TemkaDrawBot și apasă Start ca să primești mesaj privat dacă câștigi!',
-    alert_must_subscribe: (missingList) =>
-      `❌ Nu ești abonat la toate canalele necesare!\n\nAbonează-te la:\n${missingList}\napoi apasă din nou Participă.`,
-    alert_ended: '⏳ Acest giveaway s-a încheiat deja!',
-
-    winner_dm_notification: ({ prize, channel, directLink }) =>
-      `🎉 <b>Felicitări!</b>\n\n` +
-      `Ai câștigat <b>${prize}</b> pe canalul ${channel}.\n\n` +
-      `Contactează administrația canalului pentru a revendica premiul:\n` +
-      `<a href="${directLink}">${directLink}</a>`,
-    btn_claim_shoutout: '💬 Contactează administrația',
-
-    // Finished giveaway card
-    giveaway_finished_card: ({ prize, winnersText, serverSeed, seedHash, finishedAtFormatted }) =>
-      `🎉 <b>CONCURS ÎNCHEIAT: ${prize}</b>\n\n` +
-      `🏆 <b>Câștigători:</b>\n${winnersText}\n\n` +
-      `📅 <b>Finalizat:</b> ${finishedAtFormatted}\n` +
-      `🔒 <b>Verificare Provably Fair:</b>\n` +
-      `• Seed: <code>${serverSeed}</code>\n` +
-      `• Hash: <code>${seedHash}</code>\n\n` +
-      `🔍 <a href="https://temka-random-bot.tabac-sebastian.workers.dev/#verify">Verifică seed-ul online</a> · Fă și tu un concurs: <a href="https://t.me/TemkaDrawBot?start=create">@TemkaDrawBot</a>`,
-
-    verify_usage:
-      `🔐 <b>Verificator Provably Fair (SHA-256)</b>\n\n` +
-      `Trimite <code>/verify &lt;server_seed&gt;</code> pentru a calcula hash-ul SHA-256 și a-l compara cu hash-ul publicat în postare.\n\n` +
-      `🌐 Verifică și online:\nhttps://temka-random-bot.tabac-sebastian.workers.dev/#verify`,
-    verify_result: ({ seed, hash, matchedGiveaway }) =>
-      `🔐 <b>Verificare Seed SHA-256</b>\n\n` +
-      `• Seed: <code>${seed}</code>\n` +
-      `• SHA-256 calculat:\n<code>${hash}</code>\n` +
-      (matchedGiveaway
-        ? `\n✅ <b>Concurs găsit:</b> ${matchedGiveaway.prize} (<code>${matchedGiveaway.public_id}</code>, status: ${matchedGiveaway.status})`
-        : `\nℹ️ Compară acest hash cu hash-ul publicat în postarea concursului înainte de extragere.`),
-
-    no_participants: '😢 Nu au existat participanți în acest concurs.',
-    my_giveaways_empty: 'Nu ai creat încă niciun giveaway. Apasă „Creează Giveaway” pentru a începe!',
-    my_giveaways_title: '📋 <b>Giveaway-urile tale:</b>'
   }
 };
 

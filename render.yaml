@@ -11,5 +11,5 @@ services:
       - key: DB_PATH
         value: data/temka.db
       - key: DEFAULT_LANG
-        value: ru
+        value: en
 

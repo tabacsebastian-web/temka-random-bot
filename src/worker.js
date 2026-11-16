@@ -58,7 +58,7 @@ function createWorkerRuntime(env) {
     throw new Error('Missing DB (D1) binding in Cloudflare Worker environment');
   }
 
-  const defaultLang = env.DEFAULT_LANG || 'ru';
+  const defaultLang = env.DEFAULT_LANG || 'en';
   const db = createD1Database(env.DB, defaultLang);
 
   let botInfo = botInfoCache.get(env.BOT_TOKEN);
@@ -91,7 +91,7 @@ async function buildHealthResponse(env) {
   let stats = { activeUsers30d: 0, totalGiveaways: 0, totalParticipants: 0 };
   if (env.DB) {
     try {
-      const db = createD1Database(env.DB, env.DEFAULT_LANG || 'ru');
+      const db = createD1Database(env.DB, env.DEFAULT_LANG || 'en');
       await db.ping();
       d1Status = 'connected';
       stats = await db.stats.getPublicStats();

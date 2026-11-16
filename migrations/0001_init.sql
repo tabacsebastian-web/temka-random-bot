@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS users (
   user_id INTEGER PRIMARY KEY,
   username TEXT,
   first_name TEXT,
-  lang TEXT DEFAULT 'ru',
+  lang TEXT DEFAULT 'en',
   created_at INTEGER
 );
 

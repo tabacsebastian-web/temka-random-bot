@@ -10,7 +10,7 @@ function parseGiveawayRow(row) {
  * Creates an async database adapter backed by Cloudflare D1.
  * Mirrors the interface of src/db.js so bot-core works seamlessly on both runtimes.
  */
-function createD1Database(d1, defaultLang = 'ru') {
+function createD1Database(d1, defaultLang = 'en') {
   return {
     ping: async () => {
       await d1.prepare('SELECT 1 AS ok').first();

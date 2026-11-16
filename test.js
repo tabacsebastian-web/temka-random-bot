@@ -27,11 +27,12 @@ const winnersRecheck = fairness.selectWinners(serverSeed, mockParticipants, 2);
 assert(winners[0].user_id === winnersRecheck[0].user_id, 'Draw must be 100% reproducible');
 console.log('✅ Provably Fair algorithm verified successfully!');
 
-// 2. Test i18n (EN / RU / RO) & Profile metadata limits
+// 2. Test i18n (EN primary / RU secondary) & Profile metadata limits
 assert(t('en', 'btn_create_giveaway') === '➕ Create Giveaway');
 assert(t('ru', 'btn_create_giveaway') === '➕ Создать розыгрыш');
-assert(t('ro', 'btn_create_giveaway') === '➕ Creează Giveaway');
+assert(t('ro', 'btn_create_giveaway') === '➕ Create Giveaway', 'Unknown locales must fall back to English');
 const { PROFILE_TEXTS } = require('./src/profile');
+assert.deepStrictEqual(Object.keys(PROFILE_TEXTS), ['', 'ru'], 'Profile texts must only target English (default) and Russian');
 for (const [langKey, cfg] of Object.entries(PROFILE_TEXTS)) {
   assert(cfg.short_description.length <= 120, `short_description too long for ${langKey || 'default'}`);
   assert(cfg.description.length <= 512, `description too long for ${langKey || 'default'}`);
@@ -191,7 +192,7 @@ const sqliteAsD1 = {
   const { bot: cfBot, finalizeDueGiveaways } = createBot({
     token: '123456:TEST_TOKEN',
     db: d1Db,
-    defaultLang: 'ru'
+    defaultLang: 'en'
   });
   assert(cfBot && typeof finalizeDueGiveaways === 'function', 'createBot works with D1 adapter');
 

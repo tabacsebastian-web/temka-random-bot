@@ -11,6 +11,16 @@ function getMainMenuKeyboard(lang) {
     .text(t(lang, 'btn_help'), 'menu_help');
 }
 
+function getLanguageKeyboard(includeBack = false) {
+  const kb = new InlineKeyboard()
+    .text('🇬🇧 English', 'set_lang_en')
+    .text('🇷🇺 Русский', 'set_lang_ru');
+  if (includeBack) {
+    kb.row().text('🔙 Back', 'menu_back');
+  }
+  return kb;
+}
+
 function buildPostActionKeyboard(lang, publicId, count, primaryChannel) {
   const kb = new InlineKeyboard()
     .text(t(lang, 'btn_participate', count), `join_${publicId}`).row();
@@ -24,7 +34,7 @@ function buildPostActionKeyboard(lang, publicId, count, primaryChannel) {
 
 function formatDate(timestamp, lang) {
   const d = new Date(timestamp);
-  const locale = lang === 'ru' ? 'ru-RU' : lang === 'ro' ? 'ro-RO' : 'en-US';
+  const locale = lang === 'ru' ? 'ru-RU' : 'en-US';
   return d.toLocaleString(locale, {
     timeZone: 'UTC',
     month: 'short',
@@ -87,12 +97,10 @@ function recoverGiveawayFromMessage(publicId, message) {
   const txt = message.text;
   const prizeMatch =
     txt.match(/GIVEAWAY:\s*(.+?)(?:\n|$)/i) ||
-    txt.match(/РОЗЫГРЫШ:\s*(.+?)(?:\n|$)/i) ||
-    txt.match(/CONCURS:\s*(.+?)(?:\n|$)/i);
+    txt.match(/РОЗЫГРЫШ:\s*(.+?)(?:\n|$)/i);
   const winnersMatch =
     txt.match(/Winners:\s*(\d+)/i) ||
-    txt.match(/Количество победителей:\s*(\d+)/i) ||
-    txt.match(/Câștigători:\s*(\d+)/i);
+    txt.match(/Количество победителей:\s*(\d+)/i);
   const hashMatch = txt.match(/([a-f0-9]{64})/);
 
   const prize = prizeMatch ? prizeMatch[1].trim() : 'Giveaway';
@@ -109,8 +117,7 @@ function recoverGiveawayFromMessage(publicId, message) {
   let endAt = Date.now() + 3 * 86400000;
   const endsMatch =
     txt.match(/Ends:\s*(.+?)(?:\n|$)/i) ||
-    txt.match(/Окончание:\s*(.+?)(?:\n|$)/i) ||
-    txt.match(/Se încheie:\s*(.+?)(?:\n|$)/i);
+    txt.match(/Окончание:\s*(.+?)(?:\n|$)/i);
   if (endsMatch) {
     const rawDate = endsMatch[1].replace(/UTC/i, '').trim();
     const year = new Date().getUTCFullYear();
@@ -172,7 +179,7 @@ async function isUserSubscribed(api, chatId, userId) {
  * Creates a configured grammY Bot instance and giveaway finalization helpers
  * using either the sync Node SQLite adapter or the async Cloudflare D1 adapter.
  */
-function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
+function createBot({ token, db, defaultLang = 'en', botInfo = undefined }) {
   const bot = new Bot(token, botInfo ? { botInfo } : undefined);
 
   bot.catch((err) => {
@@ -184,13 +191,13 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
       let user = await db.users.get(ctx.from.id);
       if (!user) {
         const lc = (ctx.from.language_code || '').toLowerCase();
-        const userLang = lc.startsWith('ru') ? 'ru' : lc.startsWith('ro') ? 'ro' : 'en';
+        const userLang = lc.startsWith('ru') ? 'ru' : defaultLang;
         await db.users.upsert(ctx.from.id, ctx.from.username, ctx.from.first_name, userLang);
         user = { user_id: ctx.from.id, lang: userLang, last_active_at: Date.now() };
       } else if (db.users.touch && (!user.last_active_at || Date.now() - user.last_active_at > 3600000)) {
         await db.users.touch(ctx.from.id);
       }
-      ctx.lang = user.lang || defaultLang;
+      ctx.lang = ['en', 'ru'].includes(user.lang) ? user.lang : defaultLang;
     } else {
       ctx.lang = defaultLang;
     }
@@ -319,14 +326,10 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
   });
 
   bot.command(['lang', 'language'], async (ctx) => {
-    const kb = new InlineKeyboard()
-      .text('🇬🇧 English', 'set_lang_en')
-      .text('🇷🇺 Русский', 'set_lang_ru')
-      .text('🇷🇴 Română', 'set_lang_ro');
-    await ctx.reply(ctx.t('choose_lang'), { reply_markup: kb });
+    await ctx.reply(ctx.t('choose_lang'), { reply_markup: getLanguageKeyboard(false) });
   });
 
-  bot.callbackQuery(/^set_lang_(en|ru|ro)$/, async (ctx) => {
+  bot.callbackQuery(/^set_lang_(en|ru)$/, async (ctx) => {
     const chosen = ctx.match[1];
     if (ctx.from) {
       await db.users.setLang(ctx.from.id, chosen);
@@ -348,12 +351,7 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
 
   bot.callbackQuery('menu_lang', async (ctx) => {
     await ctx.answerCallbackQuery();
-    const kb = new InlineKeyboard()
-      .text('🇬🇧 English', 'set_lang_en')
-      .text('🇷🇺 Русский', 'set_lang_ru')
-      .text('🇷🇴 Română', 'set_lang_ro').row()
-      .text('🔙 Back', 'menu_back');
-    await ctx.reply(ctx.t('choose_lang'), { reply_markup: kb });
+    await ctx.reply(ctx.t('choose_lang'), { reply_markup: getLanguageKeyboard(true) });
   });
 
   bot.callbackQuery('menu_back', async (ctx) => {
@@ -704,6 +702,17 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
     const userId = ctx.from.id;
     const alreadyIn = await db.participants.isParticipating(g.id, userId);
 
+    async function resolvePostLang(g, message) {
+      if (message?.text && /РОЗЫГРЫШ:/i.test(message.text)) {
+        return 'ru';
+      }
+      if (g?.creator_id) {
+        const owner = await db.users.get(g.creator_id);
+        if (owner?.lang === 'ru') return 'ru';
+      }
+      return defaultLang;
+    }
+
     if (alreadyIn) {
       await db.participants.remove(g.id, userId);
       const newCount = await db.participants.count(g.id);
@@ -711,8 +720,9 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
       await ctx.answerCallbackQuery({ text: ctx.t('alert_left_giveaway'), show_alert: true });
 
       try {
+        const postLang = await resolvePostLang(g, ctx.callbackQuery?.message);
         await ctx.editMessageReplyMarkup({
-          reply_markup: buildPostActionKeyboard(ctx.lang, g.public_id, newCount, g.required_channels?.[0])
+          reply_markup: buildPostActionKeyboard(postLang, g.public_id, newCount, g.required_channels?.[0])
         });
       } catch (err) {}
       return;
@@ -739,8 +749,9 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
     await ctx.answerCallbackQuery({ text: ctx.t('alert_success_joined'), show_alert: true });
 
     try {
+      const postLang = await resolvePostLang(g, ctx.callbackQuery?.message);
       await ctx.editMessageReplyMarkup({
-        reply_markup: buildPostActionKeyboard(ctx.lang, g.public_id, newCount, g.required_channels?.[0])
+        reply_markup: buildPostActionKeyboard(postLang, g.public_id, newCount, g.required_channels?.[0])
       });
     } catch (err) {}
   });
@@ -864,7 +875,7 @@ function createBot({ token, db, defaultLang = 'ru', botInfo = undefined }) {
       for (const w of verifiedWinners) {
         try {
           const userObj = await db.users.get(w.user_id);
-          const userLang = userObj ? (userObj.lang || 'en') : 'en';
+          const userLang = userObj?.lang === 'ru' ? 'ru' : defaultLang;
           const dmText = t(userLang, 'winner_dm_notification', {
             prize: g.prize,
             channel: channelTitle,
