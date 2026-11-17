@@ -2,6 +2,7 @@ const { DatabaseSync } = require('node:sqlite');
 const fs = require('fs');
 const path = require('path');
 const config = require('./config');
+const { parseGiveawayRow, serializeSettings } = require('./db-helpers');
 
 // Ensure database directory exists
 const dbDir = path.dirname(config.DB_PATH);
@@ -36,7 +37,7 @@ db.exec(`
     target_chat_id TEXT,    -- where to publish
     channel_post_chat_id TEXT,
     channel_post_message_id INTEGER,
-    status TEXT DEFAULT 'draft', -- draft, active, finished, cancelled
+    status TEXT DEFAULT 'draft', -- draft, active, finalizing, finished, cancelled
     end_type TEXT DEFAULT 'time', -- time, participants
     end_at INTEGER,
     end_count INTEGER DEFAULT 0,
@@ -44,7 +45,10 @@ db.exec(`
     server_seed TEXT,
     created_at INTEGER,
     finished_at INTEGER,
-    winners_json TEXT
+    winners_json TEXT,
+    lang TEXT DEFAULT 'en',
+    photo_file_id TEXT,
+    settings_json TEXT DEFAULT '{}'
   );
 
   CREATE TABLE IF NOT EXISTS participants (
@@ -54,6 +58,8 @@ db.exec(`
     username TEXT,
     first_name TEXT,
     joined_at INTEGER,
+    extra_tickets INTEGER NOT NULL DEFAULT 0,
+    referred_by INTEGER,
     UNIQUE(giveaway_id, user_id)
   );
 
@@ -67,13 +73,22 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_participants_giveaway ON participants(giveaway_id);
 `);
 
-// Ensure last_active_at exists on existing SQLite databases
-const userCols = db.prepare('PRAGMA table_info(users)').all();
-if (!userCols.some((c) => c.name === 'last_active_at')) {
-  db.exec('ALTER TABLE users ADD COLUMN last_active_at INTEGER');
+function ensureColumn(table, column, definition) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
 }
 
-// Prepared statement helpers
+// Idempotent schema migrations for existing SQLite files
+ensureColumn('users', 'last_active_at', 'INTEGER');
+ensureColumn('giveaways', 'lang', "TEXT DEFAULT 'en'");
+ensureColumn('giveaways', 'photo_file_id', 'TEXT');
+ensureColumn('giveaways', 'settings_json', "TEXT DEFAULT '{}'");
+ensureColumn('participants', 'extra_tickets', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('participants', 'referred_by', 'INTEGER');
+db.exec('CREATE INDEX IF NOT EXISTS idx_participants_referred_by ON participants(giveaway_id, referred_by);');
+
 const userQueries = {
   get: db.prepare('SELECT * FROM users WHERE user_id = ?'),
   upsert: db.prepare(`
@@ -89,23 +104,26 @@ const userQueries = {
 };
 
 const giveawayQueries = {
-  createDraft: db.prepare(`
-    INSERT INTO giveaways (public_id, creator_id, prize, description, winners_count, required_channels, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'draft', ?)
-  `),
   getByPublicId: db.prepare('SELECT * FROM giveaways WHERE public_id = ?'),
   getById: db.prepare('SELECT * FROM giveaways WHERE id = ?'),
   getActiveToFinish: db.prepare(`
     SELECT * FROM giveaways
     WHERE status = 'active' AND (
       (end_type = 'time' AND end_at <= ?)
-      OR (end_type = 'participants' AND (SELECT COUNT(*) FROM participants WHERE giveaway_id = giveaways.id) >= end_count)
+      OR (end_type = 'participants' AND end_count > 0 AND (
+        (SELECT COUNT(*) FROM participants WHERE giveaway_id = giveaways.id) >= end_count
+        OR (end_at IS NOT NULL AND end_at <= ?)
+      ))
     )
   `),
-  updateStatus: db.prepare('UPDATE giveaways SET status = ? WHERE id = ?'),
   updatePostDetails: db.prepare(`
     UPDATE giveaways
     SET channel_post_chat_id = ?, channel_post_message_id = ?, status = 'active'
+    WHERE id = ?
+  `),
+  updatePostDetailsWithSettings: db.prepare(`
+    UPDATE giveaways
+    SET channel_post_chat_id = ?, channel_post_message_id = ?, status = 'active', settings_json = ?
     WHERE id = ?
   `),
   finish: db.prepare(`
@@ -113,18 +131,28 @@ const giveawayQueries = {
     SET status = 'finished', server_seed = ?, winners_json = ?, finished_at = ?
     WHERE id = ?
   `),
+  updateWinners: db.prepare('UPDATE giveaways SET winners_json = ? WHERE id = ?'),
+  cancel: db.prepare("UPDATE giveaways SET status = 'cancelled', finished_at = ? WHERE id = ? AND status IN ('active', 'draft')"),
   listByCreator: db.prepare('SELECT * FROM giveaways WHERE creator_id = ? ORDER BY id DESC LIMIT 20')
 };
 
 const participantQueries = {
+  get: db.prepare('SELECT * FROM participants WHERE giveaway_id = ? AND user_id = ?'),
   add: db.prepare(`
-    INSERT OR IGNORE INTO participants (giveaway_id, user_id, username, first_name, joined_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT OR IGNORE INTO participants (giveaway_id, user_id, username, first_name, joined_at, extra_tickets, referred_by)
+    VALUES (?, ?, ?, ?, ?, 0, ?)
   `),
   remove: db.prepare('DELETE FROM participants WHERE giveaway_id = ? AND user_id = ?'),
   count: db.prepare('SELECT COUNT(*) as cnt FROM participants WHERE giveaway_id = ?'),
   isParticipating: db.prepare('SELECT 1 FROM participants WHERE giveaway_id = ? AND user_id = ?'),
-  listForGiveaway: db.prepare('SELECT user_id, username, first_name, joined_at FROM participants WHERE giveaway_id = ? ORDER BY joined_at ASC')
+  listForGiveaway: db.prepare('SELECT user_id, username, first_name, joined_at, extra_tickets, referred_by FROM participants WHERE giveaway_id = ? ORDER BY joined_at ASC'),
+  syncReferrerTickets: db.prepare(`
+    UPDATE participants
+    SET extra_tickets = (
+      SELECT COUNT(*) FROM participants p2 WHERE p2.giveaway_id = ? AND p2.referred_by = ?
+    )
+    WHERE giveaway_id = ? AND user_id = ?
+  `)
 };
 
 const sessionQueries = {
@@ -155,7 +183,7 @@ module.exports = {
     const users = db.prepare('SELECT * FROM users').all();
     const giveaways = db.prepare('SELECT * FROM giveaways').all();
     const participants = db.prepare(`
-      SELECT p.user_id, p.username, p.first_name, p.joined_at, g.public_id AS giveaway_public_id
+      SELECT p.user_id, p.username, p.first_name, p.joined_at, p.extra_tickets, p.referred_by, g.public_id AS giveaway_public_id
       FROM participants p
       JOIN giveaways g ON g.id = p.giveaway_id
     `).all();
@@ -176,8 +204,8 @@ module.exports = {
         public_id, creator_id, prize, description, winners_count,
         required_channels, target_chat_id, channel_post_chat_id, channel_post_message_id,
         status, end_type, end_at, end_count, seed_hash, server_seed,
-        created_at, finished_at, winners_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        created_at, finished_at, winners_json, lang, photo_file_id, settings_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const g of state.giveaways || []) {
       const reqCh = typeof g.required_channels === 'string' ? g.required_channels : JSON.stringify(g.required_channels || []);
@@ -199,19 +227,30 @@ module.exports = {
         g.server_seed || '',
         g.created_at || Date.now(),
         g.finished_at || null,
-        g.winners_json || null
+        g.winners_json || null,
+        g.lang || config.DEFAULT_LANG,
+        g.photo_file_id || null,
+        typeof g.settings_json === 'string' ? g.settings_json : serializeSettings(g.settings)
       );
     }
 
     const findGiveaway = db.prepare('SELECT id FROM giveaways WHERE public_id = ?');
     const insertParticipant = db.prepare(`
-      INSERT OR IGNORE INTO participants (giveaway_id, user_id, username, first_name, joined_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO participants (giveaway_id, user_id, username, first_name, joined_at, extra_tickets, referred_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
     for (const p of state.participants || []) {
       const row = p.giveaway_public_id ? findGiveaway.get(p.giveaway_public_id) : null;
       if (row) {
-        insertParticipant.run(row.id, p.user_id, p.username || null, p.first_name || '', p.joined_at || Date.now());
+        insertParticipant.run(
+          row.id,
+          p.user_id,
+          p.username || null,
+          p.first_name || '',
+          p.joined_at || Date.now(),
+          p.extra_tickets || 0,
+          p.referred_by || null
+        );
       }
     }
   },
@@ -259,8 +298,9 @@ module.exports = {
         INSERT INTO giveaways (
           public_id, creator_id, prize, description, winners_count,
           required_channels, target_chat_id, channel_post_chat_id, channel_post_message_id,
-          status, end_type, end_at, end_count, seed_hash, server_seed, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          status, end_type, end_at, end_count, seed_hash, server_seed, created_at,
+          lang, photo_file_id, settings_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const info = stmt.run(
         data.public_id,
@@ -278,46 +318,43 @@ module.exports = {
         data.end_count || 0,
         data.seed_hash || '',
         data.server_seed || '',
-        data.created_at || Date.now()
+        data.created_at || Date.now(),
+        data.lang || config.DEFAULT_LANG,
+        data.photo_file_id || null,
+        serializeSettings(data.settings)
       );
       notifyChange();
       return info.lastInsertRowid;
     },
-    getByPublicId: (publicId) => {
-      const g = giveawayQueries.getByPublicId.get(publicId);
-      if (g && g.required_channels) {
-        g.required_channels = JSON.parse(g.required_channels);
-      }
-      return g;
-    },
+    getByPublicId: (publicId) => parseGiveawayRow(giveawayQueries.getByPublicId.get(publicId), config.DEFAULT_LANG),
     getBySeedHash: (seedHash) => {
       const g = db.prepare('SELECT * FROM giveaways WHERE seed_hash = ? LIMIT 1').get(seedHash);
-      if (g && g.required_channels) {
-        g.required_channels = JSON.parse(g.required_channels);
-      }
-      return g || null;
+      return parseGiveawayRow(g || null, config.DEFAULT_LANG);
     },
-    getById: (id) => {
-      const g = giveawayQueries.getById.get(id);
-      if (g && g.required_channels) {
-        g.required_channels = JSON.parse(g.required_channels);
-      }
-      return g;
-    },
+    getById: (id) => parseGiveawayRow(giveawayQueries.getById.get(id), config.DEFAULT_LANG),
     getActiveToFinish: (now = Date.now()) => {
-      const rows = giveawayQueries.getActiveToFinish.all(now);
-      return rows.map((g) => {
-        if (g.required_channels) g.required_channels = JSON.parse(g.required_channels);
-        return g;
-      });
+      return giveawayQueries.getActiveToFinish.all(now, now).map((g) => parseGiveawayRow(g, config.DEFAULT_LANG));
     },
-    updatePostDetails: (id, chatId, messageId) => {
-      giveawayQueries.updatePostDetails.run(String(chatId), messageId, id);
+    updatePostDetails: (id, chatId, messageId, settings = undefined) => {
+      if (settings !== undefined) {
+        giveawayQueries.updatePostDetailsWithSettings.run(String(chatId), messageId, serializeSettings(settings), id);
+      } else {
+        giveawayQueries.updatePostDetails.run(String(chatId), messageId, id);
+      }
       notifyChange();
     },
     finish: (id, serverSeed, winners) => {
       giveawayQueries.finish.run(serverSeed, JSON.stringify(winners), Date.now(), id);
       notifyChange();
+    },
+    updateWinners: (id, winners) => {
+      giveawayQueries.updateWinners.run(JSON.stringify(winners), id);
+      notifyChange();
+    },
+    cancel: (id) => {
+      const res = giveawayQueries.cancel.run(Date.now(), id);
+      if (res.changes > 0) notifyChange();
+      return res.changes > 0;
     },
     claimForFinish: (id) => {
       const res = db
@@ -328,23 +365,42 @@ module.exports = {
     releaseFinishClaim: (id) => {
       db.prepare("UPDATE giveaways SET status = 'active' WHERE id = ? AND status = 'finalizing'").run(id);
     },
-    listByCreator: (creatorId) => giveawayQueries.listByCreator.all(creatorId)
+    listByCreator: (creatorId) => giveawayQueries.listByCreator.all(creatorId).map((g) => parseGiveawayRow(g, config.DEFAULT_LANG))
   },
   participants: {
-    add: (giveawayId, userId, username, firstName) => {
+    get: (giveawayId, userId) => participantQueries.get.get(giveawayId, userId) || null,
+    add: (giveawayId, userId, username, firstName, referredBy = null) => {
+      let validReferrer = null;
+      if (referredBy && String(referredBy) !== String(userId)) {
+        if (participantQueries.isParticipating.get(giveawayId, referredBy)) {
+          validReferrer = Number(referredBy);
+        }
+      }
       const res = participantQueries.add.run(
         giveawayId,
         userId,
         username || null,
         firstName || '',
-        Date.now()
+        Date.now(),
+        validReferrer
       );
-      if (res.changes > 0) notifyChange();
+      if (res.changes > 0) {
+        if (validReferrer) {
+          participantQueries.syncReferrerTickets.run(giveawayId, validReferrer, giveawayId, validReferrer);
+        }
+        notifyChange();
+      }
       return res.changes > 0;
     },
     remove: (giveawayId, userId) => {
+      const existing = participantQueries.get.get(giveawayId, userId);
       const res = participantQueries.remove.run(giveawayId, userId);
-      if (res.changes > 0) notifyChange();
+      if (res.changes > 0) {
+        if (existing?.referred_by) {
+          participantQueries.syncReferrerTickets.run(giveawayId, existing.referred_by, giveawayId, existing.referred_by);
+        }
+        notifyChange();
+      }
       return res.changes > 0;
     },
     count: (giveawayId) => {

@@ -8,7 +8,7 @@ const { createBot } = botCorePkg;
 const { createD1Database } = d1Pkg;
 const { syncBotProfile } = profilePkg;
 
-const VERSION = '3.1.0-cloudflare';
+const VERSION = '3.2.0-cloudflare';
 const botInfoCache = new Map();
 
 function logInfo(event, details = {}) {
@@ -24,6 +24,14 @@ function logError(event, error, details = {}) {
   }));
 }
 
+async function sha256Hex(input) {
+  const data = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 async function getWebhookSecret(env) {
   if (env.WEBHOOK_SECRET) {
     return env.WEBHOOK_SECRET;
@@ -31,12 +39,7 @@ async function getWebhookSecret(env) {
   if (!env.BOT_TOKEN) {
     return '';
   }
-  const data = new TextEncoder().encode(`${env.BOT_TOKEN}:webhook`);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')
-    .slice(0, 32);
+  return (await sha256Hex(`${env.BOT_TOKEN}:webhook`)).slice(0, 32);
 }
 
 function timingSafeEqual(a, b) {
@@ -73,7 +76,8 @@ function createWorkerRuntime(env) {
     token: env.BOT_TOKEN,
     defaultLang,
     db,
-    botInfo
+    botInfo,
+    botUsername: env.BOT_USERNAME || 'TemkaDrawBot'
   });
 
   return { ...runtime, db };
@@ -110,6 +114,47 @@ async function buildHealthResponse(env) {
     configured: Boolean(env.BOT_TOKEN),
     stats,
     time: new Date().toISOString()
+  });
+}
+
+async function buildVerifyApiResponse(env, seed) {
+  const cleanSeed = String(seed || '').trim();
+  if (!cleanSeed) {
+    return Response.json({ ok: false, error: 'Missing seed parameter' }, { status: 400 });
+  }
+
+  const computedHash = await sha256Hex(cleanSeed);
+  let matched = null;
+
+  if (env.DB) {
+    try {
+      const db = createD1Database(env.DB, env.DEFAULT_LANG || 'en');
+      const g = await db.giveaways.getBySeedHash(computedHash);
+      if (g && g.status === 'finished') {
+        const participantsCount = await db.participants.count(g.id);
+        matched = {
+          public_id: g.public_id,
+          prize: g.prize,
+          status: g.status,
+          winners_count: g.winners_count,
+          participants_count: participantsCount,
+          finished_at: g.finished_at,
+          seed_hash: g.seed_hash,
+          winners: (g.winners || []).map((w) => ({
+            username: w.username || null,
+            first_name: w.first_name || 'Winner'
+          }))
+        };
+      }
+    } catch (err) {
+      logError('verify_api_error', err);
+    }
+  }
+
+  return Response.json({
+    ok: true,
+    computed_hash: computedHash,
+    matched_giveaway: matched
   });
 }
 
@@ -160,6 +205,10 @@ export default {
 
       logInfo('webhook_registered', { webhookUrl, profileSynced });
       return Response.json({ ok: true, webhookUrl, profileSynced });
+    }
+
+    if (path === '/api/verify' && request.method === 'GET') {
+      return buildVerifyApiResponse(env, url.searchParams.get('seed'));
     }
 
     if (path === '/health' || path === '/api/status') {

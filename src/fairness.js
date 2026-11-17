@@ -1,5 +1,7 @@
 const crypto = require('crypto');
 
+const MAX_TICKETS_PER_USER = 100;
+
 /**
  * Generates a high-entropy server seed and its public SHA-256 hash.
  * The hash is published BEFORE the contest starts.
@@ -12,24 +14,33 @@ function generateSeed() {
 }
 
 /**
- * Deterministically and uniformly shuffles and selects winners using HMAC-SHA256.
+ * Deterministically and uniformly shuffles and selects unique winners using HMAC-SHA256.
+ * Supports optional referral extra_tickets weights while ensuring each user wins at most once.
  *
  * @param {string} serverSeed - Revealed server seed
- * @param {Array<{ user_id: number|string, username?: string, first_name?: string }>} participants
+ * @param {Array<{ user_id: number|string, username?: string, first_name?: string, extra_tickets?: number }>} participants
  * @param {number} winnersCount
- * @returns {Array<any>} Ordered list of winners
+ * @returns {Array<any>} Ordered list of unique winners
  */
 function selectWinners(serverSeed, participants, winnersCount) {
-  if (!participants || participants.length === 0) return [];
-  if (winnersCount >= participants.length) {
-    return [...participants];
+  if (!participants || participants.length === 0 || winnersCount <= 0) return [];
+
+  const targetCount = Math.min(winnersCount, participants.length);
+  const hasWeightedTickets = participants.some((p) => Number(p.extra_tickets) > 0);
+
+  let pool;
+  if (!hasWeightedTickets) {
+    pool = [...participants];
+  } else {
+    pool = [];
+    for (const p of participants) {
+      const tickets = Math.min(1 + Math.max(0, Math.floor(Number(p.extra_tickets) || 0)), MAX_TICKETS_PER_USER);
+      for (let tIdx = 0; tIdx < tickets; tIdx++) {
+        pool.push(p);
+      }
+    }
   }
 
-  // Work on a copy sorted deterministically by user_id and joined_at
-  const pool = [...participants];
-
-  // Fisher-Yates shuffle driven by HMAC-SHA256
-  // Generate pseudo-random numbers using counter-based HMAC stream
   let hmacCounter = 0;
   let buffer = Buffer.alloc(0);
   let bufferOffset = 0;
@@ -48,7 +59,6 @@ function selectWinners(serverSeed, participants, winnersCount) {
 
   function randomInt(maxExclusive) {
     if (maxExclusive <= 1) return 0;
-    // Rejection sampling to prevent modulo bias
     const limit = Math.floor(0xffffffff / maxExclusive) * maxExclusive;
     let rand;
     do {
@@ -57,19 +67,25 @@ function selectWinners(serverSeed, participants, winnersCount) {
     return rand % maxExclusive;
   }
 
-  // Pick winnersCount elements
   const winners = [];
-  for (let i = 0; i < winnersCount && pool.length > 0; i++) {
+  for (let i = 0; i < targetCount && pool.length > 0; i++) {
     const chosenIndex = randomInt(pool.length);
-    const [winner] = pool.splice(chosenIndex, 1);
-    winners.push(winner);
+    const chosen = pool[chosenIndex];
+    winners.push(chosen);
+
+    if (!hasWeightedTickets) {
+      pool.splice(chosenIndex, 1);
+    } else {
+      const winnerId = String(chosen.user_id);
+      pool = pool.filter((item) => String(item.user_id) !== winnerId);
+    }
   }
 
   return winners;
 }
 
 /**
- * Validates SHA256 integrity
+ * Validates SHA-256 integrity between revealed server seed and published hash.
  */
 function verifySeedHash(serverSeed, seedHash) {
   const calculated = crypto.createHash('sha256').update(serverSeed).digest('hex');
@@ -77,6 +93,7 @@ function verifySeedHash(serverSeed, seedHash) {
 }
 
 module.exports = {
+  MAX_TICKETS_PER_USER,
   generateSeed,
   selectWinners,
   verifySeedHash

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Temka Random — Provably Fair Telegram Giveaways</title>
-  <meta name="description" content="Launch transparent, provably fair Telegram giveaways in 30 seconds with SHA-256 verification and automatic 24/7 draws." />
+  <meta name="description" content="Launch transparent, provably fair Telegram giveaways in 30 seconds with referral bonus tickets, anti-bot filters, and 1-click SHA-256 verification." />
   <style>
     :root {
       color-scheme: dark;
@@ -183,13 +183,14 @@
     }
     .verify-result {
       margin-top: 14px;
-      padding: 12px 14px;
+      padding: 14px 16px;
       border-radius: 10px;
       background: var(--card-2);
       border: 1px solid var(--border);
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 0.84rem;
-      word-break: break-all;
+      word-break: break-word;
+      white-space: pre-wrap;
       display: none;
     }
     .verify-result.ok { border-color: rgba(34, 197, 94, 0.5); color: #86efac; }
@@ -211,7 +212,7 @@
       </div>
       <p class="lead">
         Free, open-source, provably fair Telegram giveaway bot for channels and communities.
-        Create a draw in 30 seconds with automatic subscription checks and verifiable SHA-256 seeds.
+        Launch a draw in 30 seconds with referral bonus tickets, anti-bot filters, and 1-click SHA-256 verification.
       </p>
       <div class="stats-grid">
         <div class="stat">
@@ -235,8 +236,8 @@
         <a class="btn btn-primary" href="https://t.me/TemkaDrawBot?start=create" target="_blank" rel="noopener noreferrer">
           🚀 Launch Giveaway in @TemkaDrawBot
         </a>
-        <a class="btn btn-secondary" href="https://t.me/TemkaDrawBot" target="_blank" rel="noopener noreferrer">
-          Open Bot Profile
+        <a class="btn btn-secondary" href="https://t.me/TemkaDrawBot?startchannel=true&amp;admin=post_messages+edit_messages+invite_users" target="_blank" rel="noopener noreferrer">
+          ➕ Add Bot to Channel
         </a>
         <a class="btn btn-secondary" href="https://github.com/tabacsebastian-web/temka-random-bot" target="_blank" rel="noopener noreferrer">
           MIT Open-Source
@@ -246,23 +247,23 @@
 
     <section class="features">
       <div class="feature">
-        <strong>🔐 Provably Fair SHA-256</strong>
-        <p>Every contest publishes a SHA-256 seed hash upfront and reveals the server seed at the end so anyone can verify the draw.</p>
+        <strong>🔐 1-Click Provably Fair SHA-256</strong>
+        <p>Publishes the seed hash upfront and reveals the seed at finish. Verify directly in browser via <code>?seed=</code> links or <code>/verify</code>.</p>
       </div>
       <div class="feature">
-        <strong>✅ Anti-Cheat Double Check</strong>
-        <p>Subscription is verified both when joining and right before choosing winners — unsubscribers are automatically replaced.</p>
+        <strong>🛡️ Anti-Bot &amp; Viral Referrals</strong>
+        <p>Double subscription verification plus optional referral bonus tickets (+1/friend), math CAPTCHA, @username, and Telegram Premium filters.</p>
       </div>
       <div class="feature">
-        <strong>⚡ 24/7 Cloudflare Edge</strong>
-        <p>Runs continuously on Cloudflare Workers &amp; D1 with minute-level cron triggers and English &amp; Russian support.</p>
+        <strong>🎛️ Full Admin Control &amp; 24/7 Edge</strong>
+        <p>Banner photos, auto-draw by date or participant count, fair rerolls, CSV export, and 1-click clone on Cloudflare Workers &amp; D1 (EN &amp; RU).</p>
       </div>
     </section>
 
     <section id="verify" class="card">
       <h2>🔍 Provably Fair SHA-256 Seed Verifier</h2>
       <p class="lead" style="margin-bottom: 12px;">
-        Paste the revealed <code>Server Seed</code> from a finished giveaway post to verify its SHA-256 hash right in your browser.
+        Paste the revealed <code>Server Seed</code> from any finished giveaway post to verify its SHA-256 hash and look up official draw records.
       </p>
       <label for="seed-input">Revealed Server Seed</label>
       <input id="seed-input" type="text" placeholder="Paste 64-char hex seed..." />
@@ -302,7 +303,7 @@
         badge.classList.add('warn');
       });
 
-    document.getElementById('verify-btn').addEventListener('click', async () => {
+    async function runSeedVerification() {
       const seed = document.getElementById('seed-input').value.trim();
       const expected = document.getElementById('hash-input').value.trim().toLowerCase();
       const out = document.getElementById('verify-output');
@@ -321,20 +322,60 @@
         .map((b) => b.toString(16).padStart(2, '0'))
         .join('');
 
+      let lines = [];
       if (!expected) {
         out.classList.add('ok');
-        out.textContent = `Computed SHA-256: ${computed}`;
-        return;
-      }
-
-      if (computed === expected) {
+        lines.push(`Computed SHA-256: ${computed}`);
+      } else if (computed === expected) {
         out.classList.add('ok');
-        out.textContent = `✅ VERIFIED MATCH!\nComputed SHA-256: ${computed}`;
+        lines.push('✅ VERIFIED HASH MATCH!');
+        lines.push(`Computed SHA-256: ${computed}`);
       } else {
         out.classList.add('err');
-        out.textContent = `❌ MISMATCH\nComputed: ${computed}\nExpected: ${expected}`;
+        lines.push('❌ HASH MISMATCH');
+        lines.push(`Computed: ${computed}`);
+        lines.push(`Expected: ${expected}`);
       }
-    });
+
+      try {
+        const res = await fetch(`/api/verify?seed=${encodeURIComponent(seed)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.matched_giveaway) {
+            const g = data.matched_giveaway;
+            const winnersStr = (g.winners || [])
+              .map((w, idx) => `${idx + 1}. ${w.username ? '@' + w.username : (w.first_name || 'Winner')}`)
+              .join(', ');
+            lines.push('');
+            lines.push(`🎁 Matched Finished Giveaway: ${g.prize} (ID: ${g.public_id})`);
+            lines.push(`👥 Participants: ${g.participants_count} · 🏆 Winners: ${winnersStr || 'None'}`);
+            if (g.finished_at) {
+              lines.push(`📅 Finished: ${new Date(g.finished_at).toISOString()}`);
+            }
+          }
+        }
+      } catch (e) {}
+
+      out.textContent = lines.join('\n');
+    }
+
+    document.getElementById('verify-btn').addEventListener('click', runSeedVerification);
+
+    (function autoPopulateFromUrl() {
+      const searchParams = new URLSearchParams(window.location.search);
+      const hashParts = (window.location.hash || '').split('?');
+      const hashParams = new URLSearchParams(hashParts[1] || '');
+      const seedParam = searchParams.get('seed') || hashParams.get('seed') || '';
+      const hashParam = searchParams.get('hash') || hashParams.get('hash') || '';
+
+      if (seedParam) {
+        document.getElementById('seed-input').value = seedParam;
+        if (hashParam) {
+          document.getElementById('hash-input').value = hashParam;
+        }
+        runSeedVerification();
+      }
+    })();
   </script>
 </body>
 </html>

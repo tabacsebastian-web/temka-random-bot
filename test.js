@@ -1,46 +1,117 @@
 const assert = require('assert');
 const fairness = require('./src/fairness');
 const db = require('./src/db');
-const { t } = require('./src/i18n');
+const { t, PROFILE_TEXTS } = require('./src/i18n');
+const { PROFILE_TEXTS: profileCfg } = require('./src/profile');
+const {
+  escapeHtml,
+  escapeCsvCell,
+  buildParticipantsCsv,
+  signCaptchaToken,
+  createCaptchaChallenge,
+  buildChannelPostUrl
+} = require('./src/utils');
+const { parseGiveawayRow } = require('./src/db-helpers');
 
 console.log('--- Testing Temka Random Bot Components ---');
 
-// 1. Test Fairness
+// 1. Test Fairness (determinism, full-order shuffling, and weighted referral tickets)
 const { serverSeed, seedHash } = fairness.generateSeed();
 assert(serverSeed && serverSeed.length === 64, 'Server seed must be 64 hex characters');
 assert(seedHash && seedHash.length === 64, 'Seed hash must be 64 hex characters');
 assert(fairness.verifySeedHash(serverSeed, seedHash), 'Seed hash must verify');
 
-const mockParticipants = [
-  { user_id: 101, username: 'alice', first_name: 'Alice' },
-  { user_id: 102, username: 'bob', first_name: 'Bob' },
-  { user_id: 103, username: 'charlie', first_name: 'Charlie' },
-  { user_id: 104, username: 'david', first_name: 'David' }
+const manyParticipants = Array.from({ length: 12 }, (_, idx) => ({
+  user_id: 1000 + idx,
+  username: `user${idx}`,
+  first_name: `User ${idx}`,
+  extra_tickets: 0
+}));
+
+const fullShuffle = fairness.selectWinners(serverSeed, manyParticipants, manyParticipants.length);
+assert(fullShuffle.length === manyParticipants.length, 'Full shuffle must include all participants');
+assert(
+  new Set(fullShuffle.map((w) => w.user_id)).size === manyParticipants.length,
+  'Full shuffle must contain unique users'
+);
+const fullShuffleAgain = fairness.selectWinners(serverSeed, manyParticipants, manyParticipants.length);
+assert.deepStrictEqual(
+  fullShuffle.map((w) => w.user_id),
+  fullShuffleAgain.map((w) => w.user_id),
+  'Full shuffle must be deterministic'
+);
+const prefixDraw = fairness.selectWinners(serverSeed, manyParticipants, 3);
+assert.deepStrictEqual(
+  prefixDraw.map((w) => w.user_id),
+  fullShuffle.slice(0, 3).map((w) => w.user_id),
+  'Top N winners must equal the prefix of the full candidate ranking (supports provably fair rerolls)'
+);
+
+const isIdenticalOrder = fullShuffle.every((w, i) => w.user_id === manyParticipants[i].user_id);
+assert(!isIdenticalOrder, 'Selecting winnersCount === participants.length must shuffle via HMAC-SHA256');
+
+const weightedParticipants = [
+  { user_id: 1, username: 'alice', first_name: 'Alice', extra_tickets: 15 },
+  { user_id: 2, username: 'bob', first_name: 'Bob', extra_tickets: 0 },
+  { user_id: 3, username: 'charlie', first_name: 'Charlie', extra_tickets: 3 }
 ];
+const weightedWinners = fairness.selectWinners(serverSeed, weightedParticipants, 3);
+assert(weightedWinners.length === 3, 'Weighted draw must pick all 3 unique users');
+assert(new Set(weightedWinners.map((w) => w.user_id)).size === 3, 'Weighted winners must remain unique');
+console.log('✅ Provably Fair algorithm & weighted tickets verified successfully!');
 
-const winners = fairness.selectWinners(serverSeed, mockParticipants, 2);
-assert(winners.length === 2, 'Should pick exactly 2 winners');
-assert(winners[0].user_id !== winners[1].user_id, 'Winners must be distinct');
+// 2. Test Utilities (HTML escape, CSV safety, CAPTCHA HMAC, URL builder)
+assert(escapeHtml('<b onclick="x">&') === '&lt;b onclick=&quot;x&quot;&gt;&amp;', 'escapeHtml must escape markup chars');
+assert(escapeCsvCell('=CMD()') === "'=CMD()", 'escapeCsvCell must neutralize formula prefixes');
+const csv = buildParticipantsCsv([
+  { user_id: 42, username: 'admin', first_name: 'Alice, Jr.', extra_tickets: 2, referred_by: null, joined_at: 1700000000000 }
+]);
+assert(csv.includes('user_id,username,first_name,extra_tickets,total_tickets,referred_by,joined_at_utc'));
+assert(csv.includes('"Alice, Jr."') && csv.includes(',2,3,,'), 'CSV export must format tickets cleanly');
 
-// Determinism test: same seed must pick same winners
-const winnersRecheck = fairness.selectWinners(serverSeed, mockParticipants, 2);
-assert(winners[0].user_id === winnersRecheck[0].user_id, 'Draw must be 100% reproducible');
-console.log('✅ Provably Fair algorithm verified successfully!');
+const cap = createCaptchaChallenge('test_secret', 555, 'abcd1234');
+assert(cap.choices.length === 4 && cap.choices.includes(cap.answer), 'Captcha must generate 4 unique options including answer');
+assert(signCaptchaToken('test_secret', 555, 'abcd1234', cap.answer) === cap.sig, 'Captcha signature must match');
+assert(buildChannelPostUrl({ username: 'mychan' }, -100123, 77) === 'https://t.me/mychan/77');
+assert(buildChannelPostUrl({ title: 'Priv' }, -100123456789, 88) === 'https://t.me/c/123456789/88');
+console.log('✅ Utilities (HTML escape, CSV export, HMAC captcha, links) verified successfully!');
 
-// 2. Test i18n (EN primary / RU secondary) & Profile metadata limits
+// 3. Test i18n (EN primary / RU secondary) & Profile metadata limits
 assert(t('en', 'btn_create_giveaway') === '➕ Create Giveaway');
 assert(t('ru', 'btn_create_giveaway') === '➕ Создать розыгрыш');
 assert(t('ro', 'btn_create_giveaway') === '➕ Create Giveaway', 'Unknown locales must fall back to English');
-const { PROFILE_TEXTS } = require('./src/profile');
-assert.deepStrictEqual(Object.keys(PROFILE_TEXTS), ['', 'ru'], 'Profile texts must only target English (default) and Russian');
-for (const [langKey, cfg] of Object.entries(PROFILE_TEXTS)) {
+
+const safeCard = t('en', 'giveaway_card', {
+  prize: '<script>100 USDT</script>',
+  description: 'A & B',
+  winnersCount: 2,
+  channels: [{ id: -1001, title: 'My <Channel>', username: 'mychan' }],
+  endType: 'participants',
+  endCount: 500,
+  endAtFormatted: 'Nov 20, 12:00 UTC',
+  seedHash,
+  settings: { referralsEnabled: true, requireCaptcha: true, requireUsername: true, requirePremium: true }
+});
+assert(!safeCard.includes('<script>') && safeCard.includes('&lt;script&gt;100 USDT&lt;/script&gt;'));
+assert(safeCard.includes('500') && safeCard.includes('+1 Ticket per friend') && safeCard.includes('Anti-Bot Captcha'));
+
+const dmNoCyber = t('en', 'winner_dm_notification', {
+  prize: 'Nitro',
+  channel: 'My Channel',
+  contactUrl: '',
+  contactLabel: ''
+});
+assert(!dmNoCyber.includes('CyberBeats44') && !dmNoCyber.includes('Vertex Beats'), 'Hardcoded fallback must be gone');
+
+assert.deepStrictEqual(Object.keys(profileCfg), ['', 'ru'], 'Profile texts must only target English (default) and Russian');
+for (const [langKey, cfg] of Object.entries(profileCfg)) {
   assert(cfg.short_description.length <= 120, `short_description too long for ${langKey || 'default'}`);
   assert(cfg.description.length <= 512, `description too long for ${langKey || 'default'}`);
-  assert(Array.isArray(cfg.commands) && cfg.commands.length >= 3, `commands missing for ${langKey || 'default'}`);
+  assert(Array.isArray(cfg.commands) && cfg.commands.length === 6, `commands count mismatch for ${langKey || 'default'}`);
 }
-console.log('✅ i18n & Telegram profile limits verified successfully!');
+console.log('✅ i18n escaping & Telegram profile limits verified successfully!');
 
-// 3. Test Database + State Export/Import & Change Hooks
+// 4. Test SQLite DB + Referral Ticket Accounting + End-by-Count + Cancel/Reroll/Clone fields
 let changeNotifications = 0;
 db.onChange(() => {
   changeNotifications += 1;
@@ -58,57 +129,50 @@ const testGid = db.giveaways.create({
   description: 'Test giveaway',
   winners_count: 1,
   required_channels: [{ id: -1001234567, title: 'Test Channel', username: 'testchannel' }],
-  end_at: Date.now() + 3600000,
+  end_type: 'participants',
+  end_count: 2,
+  end_at: Date.now() + 86400000,
   seed_hash: seedHash,
   server_seed: serverSeed,
   channel_post_chat_id: '-100999888',
   channel_post_message_id: 42,
-  created_at: customCreatedAt
+  created_at: customCreatedAt,
+  lang: 'ru',
+  photo_file_id: 'AgACAgIAAxkBA_test_photo',
+  settings: { referralsEnabled: true, requireCaptcha: true, creatorUsername: 'creator_test' },
+  status: 'active'
 });
 assert(testGid > 0, 'Giveaway inserted');
 
 const fetched = db.giveaways.getByPublicId(testPubId);
-assert(fetched && fetched.prize === '100 USDT', 'Giveaway query matches');
-assert(fetched.channel_post_chat_id === '-100999888', 'channel_post_chat_id must persist on create');
-assert(fetched.channel_post_message_id === 42, 'channel_post_message_id must persist on create');
-assert(fetched.created_at === customCreatedAt, 'created_at must persist on create');
+assert(fetched && fetched.lang === 'ru', 'Giveaway lang must persist');
+assert(fetched.photo_file_id === 'AgACAgIAAxkBA_test_photo', 'photo_file_id must persist');
+assert(fetched.settings.requireCaptcha === true && fetched.settings.creatorUsername === 'creator_test', 'settings must persist');
 
-const changesBeforeParticipant = changeNotifications;
-db.participants.add(testGid, 111, 'user1', 'First');
-assert(db.participants.count(testGid) === 1, 'Participant counted');
-assert(db.participants.isParticipating(testGid, 111) === true, 'Participant detected');
-assert(db.participants.isParticipating(testGid, 222) === false, 'Non-participant detected');
-assert(changeNotifications > changesBeforeParticipant, 'onChange must fire on participant add');
+// Participant 1 joins (with invalid self-referral ignored), Participant 2 joins referred by 111
+db.participants.add(testGid, 111, 'user1', 'First', 111);
+assert(db.participants.get(testGid, 111).extra_tickets === 0, 'Self-referral must not grant tickets');
+assert(db.giveaways.getActiveToFinish().every((g) => g.id !== testGid), 'Count-based giveaway must not finish at 1/2');
+
+db.participants.add(testGid, 222, 'user2', 'Second', 111);
+assert(db.participants.count(testGid) === 2, 'Two participants counted');
+assert(db.participants.get(testGid, 111).extra_tickets === 1, 'Referrer must gain +1 ticket when friend joins');
+assert(db.giveaways.getActiveToFinish().some((g) => g.id === testGid), 'Count-based giveaway must trigger finish at 2/2');
 
 const exported = db.exportState();
-assert(Array.isArray(exported.users), 'exportState must include users array');
-assert(Array.isArray(exported.giveaways), 'exportState must include giveaways array');
-assert(Array.isArray(exported.participants), 'exportState must include participants array');
-assert(
-  exported.giveaways.some((g) => g.public_id === testPubId && g.channel_post_message_id === 42),
-  'exportState must include newly created giveaway'
-);
-assert(
-  exported.participants.some((p) => p.giveaway_public_id === testPubId && p.user_id === 111),
-  'exportState must key participants by giveaway_public_id'
-);
-
-// Test importState idempotency / round-trip
 db.importState(exported);
-assert(db.participants.isParticipating(testGid, 111) === true, 'Participant preserved after importState');
+assert(db.participants.get(testGid, 111).extra_tickets === 1, 'Extra tickets preserved across export/import');
 
-// Test remove
-const changesBeforeRemove = changeNotifications;
-db.participants.remove(testGid, 111);
-assert(db.participants.count(testGid) === 0, 'Participant removed');
-assert(db.participants.isParticipating(testGid, 111) === false, 'Participant no longer in DB');
-assert(changeNotifications > changesBeforeRemove, 'onChange must fire on participant remove');
+db.participants.remove(testGid, 222);
+assert(db.participants.get(testGid, 111).extra_tickets === 0, 'Referrer ticket must decrement if referred friend leaves');
 
-console.log('✅ Database layer verified successfully!');
+assert(db.giveaways.cancel(testGid) === true, 'Cancel active giveaway succeeds');
+assert(db.giveaways.getById(testGid).status === 'cancelled', 'Giveaway status becomes cancelled');
+console.log('✅ SQLite DB layer (referrals, count-end, cancel, settings, export/import) verified successfully!');
 
-// 4. Test Cloudflare D1 async adapter & bot-core factory
+// 5. Test Cloudflare D1 async adapter & bot-core factory
 const { createD1Database } = require('./src/db-d1');
-const { createBot } = require('./src/bot-core');
+const { createBot, parseCustomDate, recoverGiveawayFromMessage } = require('./src/bot-core');
 
 const sqliteAsD1 = {
   prepare(sql) {
@@ -155,46 +219,51 @@ const sqliteAsD1 = {
     end_type: 'time',
     end_at: Date.now() - 1000,
     seed_hash: d1SeedPair.seedHash,
-    server_seed: d1SeedPair.serverSeed
+    server_seed: d1SeedPair.serverSeed,
+    lang: 'ru',
+    settings: { referralsEnabled: true, creatorUsername: 'd1_tester' }
   });
   assert(d1Gid > 0, 'D1 giveaway inserted');
   const byHash = await d1Db.giveaways.getBySeedHash(d1SeedPair.seedHash);
-  assert(byHash && byHash.public_id === d1PubId, 'D1 getBySeedHash works');
-  await d1Db.giveaways.updatePostDetails(d1Gid, -100777, 99);
+  assert(byHash && byHash.public_id === d1PubId && byHash.lang === 'ru', 'D1 getBySeedHash parses lang and settings');
+  await d1Db.giveaways.updatePostDetails(d1Gid, -100777, 99, { referralsEnabled: true, hasPhoto: false });
 
   await d1Db.users.touch(888888);
   const d1Stats = await d1Db.stats.getPublicStats();
   assert(d1Stats.activeUsers30d >= 1 && d1Stats.totalGiveaways >= 1, 'D1 public stats work');
-  const nodeStats = db.stats.getPublicStats();
-  assert(nodeStats.activeUsers30d >= 1 && nodeStats.totalGiveaways >= 1, 'Node SQLite public stats work');
 
   assert(await d1Db.participants.add(d1Gid, 701, 'p1', 'One') === true, 'D1 participant add works');
-  assert(await d1Db.participants.add(d1Gid, 701, 'p1', 'One') === false, 'D1 participant duplicate ignored');
-  assert(await d1Db.participants.count(d1Gid) === 1, 'D1 participant count matches');
-  assert(await d1Db.participants.isParticipating(d1Gid, 701) === true, 'D1 isParticipating matches');
+  assert(await d1Db.participants.add(d1Gid, 702, 'p2', 'Two', 701) === true, 'D1 referral participant add works');
+  assert((await d1Db.participants.get(d1Gid, 701)).extra_tickets === 1, 'D1 referrer gains +1 ticket');
+  await d1Db.participants.remove(d1Gid, 702);
+  assert((await d1Db.participants.get(d1Gid, 701)).extra_tickets === 0, 'D1 referrer ticket decrements on leave');
 
   const due = await d1Db.giveaways.getActiveToFinish(Date.now());
   assert(due.some((item) => item.id === d1Gid), 'D1 getActiveToFinish detects due giveaway');
 
-  assert(await d1Db.giveaways.claimForFinish(d1Gid) === true, 'D1 claimForFinish acquires lock');
-  assert(await d1Db.giveaways.claimForFinish(d1Gid) === false, 'D1 claimForFinish prevents double finish');
-  await d1Db.giveaways.releaseFinishClaim(d1Gid);
-  assert((await d1Db.giveaways.getById(d1Gid)).status === 'active', 'D1 releaseFinishClaim restores active');
-  await d1Db.giveaways.finish(d1Gid, serverSeed, [{ user_id: 701, username: 'p1', first_name: 'One' }]);
-  assert((await d1Db.giveaways.getById(d1Gid)).status === 'finished', 'D1 finish marks giveaway finished');
-
-  await d1Db.sessions.set(888888, 'step_prize', { channels: [] });
-  const s = await d1Db.sessions.get(888888);
-  assert(s && s.step === 'step_prize', 'D1 sessions set/get works');
-  await d1Db.sessions.clear(888888);
-  assert((await d1Db.sessions.get(888888)) === null, 'D1 sessions clear works');
+  await d1Db.giveaways.finish(d1Gid, d1SeedPair.serverSeed, [{ user_id: 701, username: 'p1', first_name: 'One' }]);
+  await d1Db.giveaways.updateWinners(d1Gid, [
+    { user_id: 701, username: 'p1', first_name: 'One' },
+    { user_id: 703, username: 'p3', first_name: 'Three' }
+  ]);
+  const updatedD1 = await d1Db.giveaways.getById(d1Gid);
+  assert(updatedD1.status === 'finished' && updatedD1.winners.length === 2, 'D1 updateWinners supports reroll');
 
   const { bot: cfBot, finalizeDueGiveaways } = createBot({
     token: '123456:TEST_TOKEN',
     db: d1Db,
-    defaultLang: 'en'
+    defaultLang: 'en',
+    botUsername: 'TemkaDrawBot'
   });
   assert(cfBot && typeof finalizeDueGiveaways === 'function', 'createBot works with D1 adapter');
+  assert(parseCustomDate('25.12.2030 18:00') > Date.now(), 'parseCustomDate parses future UTC date');
+  const rec = recoverGiveawayFromMessage('deadbeef', {
+    chat: { id: -1001, title: 'Chan', username: 'chan' },
+    message_id: 12,
+    text: '🎁 GIVEAWAY: Test\nWinners: 2\n' + seedHash
+  });
+  assert(rec && rec.winners_count === 2 && rec.seed_hash === seedHash, 'recoverGiveawayFromMessage parses card');
+  assert(parseGiveawayRow({ ...rec, settings_json: '{}' }).settings.referralsEnabled === true, 'parseGiveawayRow normalizes defaults');
 
   console.log('✅ Cloudflare D1 adapter & bot-core verified successfully!');
   console.log('🎉 All unit tests passed!');

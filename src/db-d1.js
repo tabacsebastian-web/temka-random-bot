@@ -1,16 +1,24 @@
-function parseGiveawayRow(row) {
-  if (!row) return null;
-  if (typeof row.required_channels === 'string') {
-    row.required_channels = JSON.parse(row.required_channels || '[]');
-  }
-  return row;
-}
+const { parseGiveawayRow, serializeSettings } = require('./db-helpers');
 
 /**
  * Creates an async database adapter backed by Cloudflare D1.
  * Mirrors the interface of src/db.js so bot-core works seamlessly on both runtimes.
  */
 function createD1Database(d1, defaultLang = 'en') {
+  async function syncReferrerTickets(giveawayId, referrerId) {
+    if (!referrerId) return;
+    await d1
+      .prepare(`
+        UPDATE participants
+        SET extra_tickets = (
+          SELECT COUNT(*) FROM participants p2 WHERE p2.giveaway_id = ? AND p2.referred_by = ?
+        )
+        WHERE giveaway_id = ? AND user_id = ?
+      `)
+      .bind(giveawayId, referrerId, giveawayId, referrerId)
+      .run();
+  }
+
   return {
     ping: async () => {
       await d1.prepare('SELECT 1 AS ok').first();
@@ -70,8 +78,9 @@ function createD1Database(d1, defaultLang = 'en') {
           INSERT INTO giveaways (
             public_id, creator_id, prize, description, winners_count,
             required_channels, target_chat_id, channel_post_chat_id, channel_post_message_id,
-            status, end_type, end_at, end_count, seed_hash, server_seed, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            status, end_type, end_at, end_count, seed_hash, server_seed, created_at,
+            lang, photo_file_id, settings_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).bind(
           data.public_id,
           data.creator_id,
@@ -88,24 +97,27 @@ function createD1Database(d1, defaultLang = 'en') {
           data.end_count || 0,
           data.seed_hash || '',
           data.server_seed || '',
-          data.created_at || Date.now()
+          data.created_at || Date.now(),
+          data.lang || defaultLang,
+          data.photo_file_id || null,
+          serializeSettings(data.settings)
         ).run();
         return res.meta?.last_row_id;
       },
 
       getByPublicId: async (publicId) => {
         const row = await d1.prepare('SELECT * FROM giveaways WHERE public_id = ?').bind(publicId).first();
-        return parseGiveawayRow(row);
+        return parseGiveawayRow(row, defaultLang);
       },
 
       getBySeedHash: async (seedHash) => {
         const row = await d1.prepare('SELECT * FROM giveaways WHERE seed_hash = ? LIMIT 1').bind(seedHash).first();
-        return parseGiveawayRow(row);
+        return parseGiveawayRow(row, defaultLang);
       },
 
       getById: async (id) => {
         const row = await d1.prepare('SELECT * FROM giveaways WHERE id = ?').bind(id).first();
-        return parseGiveawayRow(row);
+        return parseGiveawayRow(row, defaultLang);
       },
 
       getActiveToFinish: async (now = Date.now()) => {
@@ -113,10 +125,13 @@ function createD1Database(d1, defaultLang = 'en') {
           SELECT * FROM giveaways
           WHERE status = 'active' AND (
             (end_type = 'time' AND end_at <= ?)
-            OR (end_type = 'participants' AND (SELECT COUNT(*) FROM participants WHERE giveaway_id = giveaways.id) >= end_count)
+            OR (end_type = 'participants' AND end_count > 0 AND (
+              (SELECT COUNT(*) FROM participants WHERE giveaway_id = giveaways.id) >= end_count
+              OR (end_at IS NOT NULL AND end_at <= ?)
+            ))
           )
-        `).bind(now).all();
-        return (res.results || []).map(parseGiveawayRow);
+        `).bind(now, now).all();
+        return (res.results || []).map((row) => parseGiveawayRow(row, defaultLang));
       },
 
       claimForFinish: async (id) => {
@@ -134,11 +149,18 @@ function createD1Database(d1, defaultLang = 'en') {
           .run();
       },
 
-      updatePostDetails: async (id, chatId, messageId) => {
-        await d1
-          .prepare("UPDATE giveaways SET channel_post_chat_id = ?, channel_post_message_id = ?, status = 'active' WHERE id = ?")
-          .bind(String(chatId), messageId, id)
-          .run();
+      updatePostDetails: async (id, chatId, messageId, settings = undefined) => {
+        if (settings !== undefined) {
+          await d1
+            .prepare("UPDATE giveaways SET channel_post_chat_id = ?, channel_post_message_id = ?, status = 'active', settings_json = ? WHERE id = ?")
+            .bind(String(chatId), messageId, serializeSettings(settings), id)
+            .run();
+        } else {
+          await d1
+            .prepare("UPDATE giveaways SET channel_post_chat_id = ?, channel_post_message_id = ?, status = 'active' WHERE id = ?")
+            .bind(String(chatId), messageId, id)
+            .run();
+        }
       },
 
       finish: async (id, serverSeed, winners) => {
@@ -148,33 +170,80 @@ function createD1Database(d1, defaultLang = 'en') {
           .run();
       },
 
+      updateWinners: async (id, winners) => {
+        await d1
+          .prepare('UPDATE giveaways SET winners_json = ? WHERE id = ?')
+          .bind(JSON.stringify(winners), id)
+          .run();
+      },
+
+      cancel: async (id) => {
+        const res = await d1
+          .prepare("UPDATE giveaways SET status = 'cancelled', finished_at = ? WHERE id = ? AND status IN ('active', 'draft')")
+          .bind(Date.now(), id)
+          .run();
+        return (res.meta?.changes || 0) > 0;
+      },
+
       listByCreator: async (creatorId) => {
         const res = await d1
           .prepare('SELECT * FROM giveaways WHERE creator_id = ? ORDER BY id DESC LIMIT 20')
           .bind(creatorId)
           .all();
-        return res.results || [];
+        return (res.results || []).map((row) => parseGiveawayRow(row, defaultLang));
       }
     },
 
     participants: {
-      add: async (giveawayId, userId, username, firstName) => {
+      get: async (giveawayId, userId) => {
+        return d1
+          .prepare('SELECT * FROM participants WHERE giveaway_id = ? AND user_id = ?')
+          .bind(giveawayId, userId)
+          .first();
+      },
+
+      add: async (giveawayId, userId, username, firstName, referredBy = null) => {
+        let validReferrer = null;
+        if (referredBy && String(referredBy) !== String(userId)) {
+          const refRow = await d1
+            .prepare('SELECT 1 AS found FROM participants WHERE giveaway_id = ? AND user_id = ?')
+            .bind(giveawayId, referredBy)
+            .first();
+          if (refRow) {
+            validReferrer = Number(referredBy);
+          }
+        }
+
         const res = await d1
           .prepare(`
-            INSERT OR IGNORE INTO participants (giveaway_id, user_id, username, first_name, joined_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO participants (giveaway_id, user_id, username, first_name, joined_at, extra_tickets, referred_by)
+            VALUES (?, ?, ?, ?, ?, 0, ?)
           `)
-          .bind(giveawayId, userId, username || null, firstName || '', Date.now())
+          .bind(giveawayId, userId, username || null, firstName || '', Date.now(), validReferrer)
           .run();
-        return (res.meta?.changes || 0) > 0;
+
+        const added = (res.meta?.changes || 0) > 0;
+        if (added && validReferrer) {
+          await syncReferrerTickets(giveawayId, validReferrer);
+        }
+        return added;
       },
 
       remove: async (giveawayId, userId) => {
+        const existing = await d1
+          .prepare('SELECT referred_by FROM participants WHERE giveaway_id = ? AND user_id = ?')
+          .bind(giveawayId, userId)
+          .first();
+
         const res = await d1
           .prepare('DELETE FROM participants WHERE giveaway_id = ? AND user_id = ?')
           .bind(giveawayId, userId)
           .run();
-        return (res.meta?.changes || 0) > 0;
+        const removed = (res.meta?.changes || 0) > 0;
+        if (removed && existing?.referred_by) {
+          await syncReferrerTickets(giveawayId, existing.referred_by);
+        }
+        return removed;
       },
 
       count: async (giveawayId) => {
@@ -195,7 +264,7 @@ function createD1Database(d1, defaultLang = 'en') {
 
       listForGiveaway: async (giveawayId) => {
         const res = await d1
-          .prepare('SELECT user_id, username, first_name, joined_at FROM participants WHERE giveaway_id = ? ORDER BY joined_at ASC')
+          .prepare('SELECT user_id, username, first_name, joined_at, extra_tickets, referred_by FROM participants WHERE giveaway_id = ? ORDER BY joined_at ASC')
           .bind(giveawayId)
           .all();
         return res.results || [];

@@ -1,38 +1,40 @@
 const PROFILE_TEXTS = {
   '': {
     short_description:
-      '🎁 Provably fair Telegram giveaways (SHA-256) with auto subscription check & 24/7 draws. Free for channels!',
+      '🎁 Provably fair Telegram giveaways (SHA-256) with referrals, anti-bot filters & 24/7 draws. Free for channels!',
     description:
       '🎁 Launch transparent, cheat-proof giveaways in your Telegram channels in 30 seconds!\n\n' +
       '✨ Why channel admins choose Temka Random:\n' +
-      '• 🔐 Provably Fair (SHA-256 + HMAC-SHA256) — zero rigging, anyone can verify the seed\n' +
-      '• ✅ Double Subscription Check — verifies membership on join and again at draw time\n' +
-      '• ⚡ 24/7 Automatic Draws — powered by Cloudflare Workers & D1, never misses a deadline\n' +
-      '• 🌐 English (default) & Russian + live giveaway stats\n\n' +
+      '• 🔐 Provably Fair (SHA-256 + HMAC) — zero rigging, 1-click web seed verification\n' +
+      '• ✅ Anti-Bot & Double Sub Check — optional math CAPTCHA, @username & Premium filters\n' +
+      '• 🔗 Viral Growth & Controls — +1 referral tickets, photo banners, CSV export & rerolls\n' +
+      '• ⚡ Always On 24/7 — powered by Cloudflare Workers & D1 (EN / RU)\n\n' +
       '👇 Tap START to launch your first giveaway for free!',
     commands: [
       { command: 'start', description: '🎁 Main menu & create a giveaway' },
-      { command: 'help', description: '🛡️ How Provably Fair draws work' },
+      { command: 'my', description: '📋 Manage, reroll & export giveaways' },
       { command: 'verify', description: '🔐 Verify any giveaway seed (SHA-256)' },
+      { command: 'help', description: '🛡️ How Provably Fair draws work' },
       { command: 'lang', description: '🌐 Switch language (EN / RU)' },
       { command: 'cancel', description: '❌ Cancel current giveaway setup' }
     ]
   },
   ru: {
     short_description:
-      '🎁 Честные розыгрыши в Telegram (SHA-256) с проверкой подписки и авто-итогами 24/7. Бесплатно!',
+      '🎁 Честные розыгрыши в Telegram (SHA-256) с рефералами, анти-бот защитой и авто-итогами 24/7!',
     description:
       '🎁 Запускайте честные и защищённые розыгрыши в Telegram-каналах за 30 секунд!\n\n' +
       '✨ Почему админы выбирают Temka Random:\n' +
-      '• 🔐 Provably Fair (SHA-256 + HMAC) — без подкрутки, любой может проверить сид\n' +
-      '• ✅ Двойная проверка подписки — при участии и повторно в момент розыгрыша\n' +
-      '• ⚡ Авто-итоги 24/7 — работает на Cloudflare Workers & D1, без задержек\n' +
-      '• 🌐 English / Русский + статистика в реальном времени\n\n' +
+      '• 🔐 Provably Fair (SHA-256 + HMAC) — без подкрутки, проверка сида в 1 клик\n' +
+      '• ✅ Анти-бот и проверка подписки — капча, фильтр @username и Telegram Premium\n' +
+      '• 🔗 Рост и удобство — +1 билет за друга, баннеры, экспорт CSV и реролл\n' +
+      '• ⚡ Работает 24/7 на Cloudflare Workers & D1 (EN / RU)\n\n' +
       '👇 Нажмите ЗАПУСТИТЬ, чтобы создать первый розыгрыш бесплатно!',
     commands: [
       { command: 'start', description: '🎁 Главное меню и создание розыгрыша' },
-      { command: 'help', description: '🛡️ Как работает честный алгоритм' },
+      { command: 'my', description: '📋 Управление, реролл и экспорт CSV' },
       { command: 'verify', description: '🔐 Проверить сид розыгрыша (SHA-256)' },
+      { command: 'help', description: '🛡️ Как работает честный алгоритм' },
       { command: 'lang', description: '🌐 Сменить язык (EN / RU)' },
       { command: 'cancel', description: '❌ Отменить создание розыгрыша' }
     ]
