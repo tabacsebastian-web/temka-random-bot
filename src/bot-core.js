@@ -326,12 +326,54 @@ async function editChannelPost(api, g, fullText, captionText, replyMarkup) {
   }
 }
 
+const USER_CACHE_TTL_MS = 120000;
+const USER_CACHE_MAX_SIZE = 2000;
+const STATS_CACHE_TTL_MS = 60000;
+const STATS_STALE_TTL_MS = 300000;
+const COUNTER_EDIT_DEBOUNCE_MS = 1500;
+
+function answerCb(ctx, opts = undefined) {
+  if (!ctx.callbackQuery) return Promise.resolve();
+  return ctx.answerCallbackQuery(opts).catch(() => {});
+}
+
 /**
  * Creates a configured grammY Bot instance and giveaway finalization helpers
  * using either the sync Node SQLite adapter or the async Cloudflare D1 adapter.
  */
-function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUsername: explicitUsername = '' }) {
+function createBot({
+  token,
+  db,
+  defaultLang = 'en',
+  botInfo = undefined,
+  botUsername: explicitUsername = '',
+  caches = undefined,
+  scheduleBackground = undefined
+}) {
   const bot = new Bot(token, botInfo ? { botInfo } : undefined);
+  const runtimeCaches = caches || {
+    users: new Map(),
+    stats: { value: null, updatedAt: 0 },
+    channelRefresh: new Map()
+  };
+  const runBg = typeof scheduleBackground === 'function'
+    ? scheduleBackground
+    : (promise) => {
+        Promise.resolve(promise).catch(() => {});
+      };
+
+  function cacheUserEntry(userId, lang, lastActiveAt) {
+    const key = String(userId);
+    if (runtimeCaches.users.size >= USER_CACHE_MAX_SIZE && !runtimeCaches.users.has(key)) {
+      const oldestKey = runtimeCaches.users.keys().next().value;
+      if (oldestKey !== undefined) runtimeCaches.users.delete(oldestKey);
+    }
+    runtimeCaches.users.set(key, {
+      lang: ['en', 'ru'].includes(lang) ? lang : defaultLang,
+      lastActiveAt: Number(lastActiveAt || 0),
+      expiresAt: Date.now() + USER_CACHE_TTL_MS
+    });
+  }
 
   bot.catch((err) => {
     console.error('[Bot] Handler error:', err);
@@ -339,16 +381,36 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
 
   bot.use(async (ctx, next) => {
     if (ctx.from) {
-      let user = await db.users.get(ctx.from.id);
-      if (!user) {
-        const lc = (ctx.from.language_code || '').toLowerCase();
-        const userLang = lc.startsWith('ru') ? 'ru' : defaultLang;
-        await db.users.upsert(ctx.from.id, ctx.from.username, ctx.from.first_name, userLang);
-        user = { user_id: ctx.from.id, lang: userLang, last_active_at: Date.now() };
-      } else if (db.users.touch && (!user.last_active_at || Date.now() - user.last_active_at > 3600000)) {
-        await db.users.touch(ctx.from.id);
+      const now = Date.now();
+      const cacheKey = String(ctx.from.id);
+      const cached = runtimeCaches.users.get(cacheKey);
+      let userLang;
+
+      if (cached && cached.expiresAt > now) {
+        userLang = cached.lang;
+        if (db.users.touch && (!cached.lastActiveAt || now - cached.lastActiveAt > 3600000)) {
+          cached.lastActiveAt = now;
+          runBg(db.users.touch(ctx.from.id));
+        }
+      } else {
+        let user = await db.users.get(ctx.from.id);
+        if (!user) {
+          const lc = (ctx.from.language_code || '').toLowerCase();
+          userLang = lc.startsWith('ru') ? 'ru' : defaultLang;
+          await db.users.upsert(ctx.from.id, ctx.from.username, ctx.from.first_name, userLang);
+          cacheUserEntry(ctx.from.id, userLang, now);
+        } else {
+          userLang = ['en', 'ru'].includes(user.lang) ? user.lang : defaultLang;
+          let activeAt = Number(user.last_active_at || 0);
+          if (db.users.touch && (!activeAt || now - activeAt > 3600000)) {
+            activeAt = now;
+            runBg(db.users.touch(ctx.from.id));
+          }
+          cacheUserEntry(ctx.from.id, userLang, activeAt);
+        }
       }
-      ctx.lang = ['en', 'ru'].includes(user.lang) ? user.lang : defaultLang;
+
+      ctx.lang = userLang;
     } else {
       ctx.lang = defaultLang;
     }
@@ -455,15 +517,37 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
     };
   }
 
+  async function getPublicStatsFast() {
+    if (!db.stats?.getPublicStats) return null;
+    const now = Date.now();
+    const cache = runtimeCaches.stats;
+    if (cache.value && now - cache.updatedAt < STATS_CACHE_TTL_MS) {
+      return cache.value;
+    }
+    if (cache.value && now - cache.updatedAt < STATS_STALE_TTL_MS) {
+      runBg(
+        Promise.resolve(db.stats.getPublicStats()).then((fresh) => {
+          cache.value = fresh;
+          cache.updatedAt = Date.now();
+        })
+      );
+      return cache.value;
+    }
+    const fresh = await db.stats.getPublicStats();
+    cache.value = fresh;
+    cache.updatedAt = Date.now();
+    return fresh;
+  }
+
   async function sendWelcomeMenu(ctx) {
     const name = ctx.from?.first_name || 'Friend';
     let text = ctx.t('welcome', name);
-    if (db.stats?.getPublicStats) {
-      try {
-        const stats = await db.stats.getPublicStats();
+    try {
+      const stats = await getPublicStatsFast();
+      if (stats) {
         text += ctx.t('welcome_stats', stats);
-      } catch (err) {}
-    }
+      }
+    } catch (err) {}
     await ctx.reply(text, {
       parse_mode: 'HTML',
       reply_markup: getMainMenuKeyboard(ctx.lang)
@@ -472,18 +556,20 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
 
   async function startCreateWizard(ctx) {
     if (!ctx.from) return;
-    await db.sessions.set(ctx.from.id, 'step_prize', {
-      channels: [],
-      lang: ctx.lang,
-      end_type: 'time',
-      end_count: 0,
-      photo_file_id: null,
-      settings: parseSettings({ creatorUsername: ctx.from.username || '' })
-    });
-    await ctx.reply(ctx.t('wizard_step_prize'), {
-      parse_mode: 'HTML',
-      reply_markup: new InlineKeyboard().text(ctx.t('btn_cancel'), 'wizard_cancel')
-    });
+    await Promise.all([
+      db.sessions.set(ctx.from.id, 'step_prize', {
+        channels: [],
+        lang: ctx.lang,
+        end_type: 'time',
+        end_count: 0,
+        photo_file_id: null,
+        settings: parseSettings({ creatorUsername: ctx.from.username || '' })
+      }),
+      ctx.reply(ctx.t('wizard_step_prize'), {
+        parse_mode: 'HTML',
+        reply_markup: new InlineKeyboard().text(ctx.t('btn_cancel'), 'wizard_cancel')
+      })
+    ]);
   }
 
   async function showGiveawayPreview(ctx, session, { reuseSeed = false, editInPlace = false } = {}) {
@@ -498,35 +584,40 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
     data.settings = parseSettings(data.settings);
     if (!data.lang) data.lang = ctx.lang;
 
-    await db.sessions.set(ctx.from.id, 'preview', data);
-
     const { text, kb } = renderPreviewPayload(ctx.lang, data);
 
-    if (editInPlace) {
-      await editOrReply(ctx, text, {
+    const sendPreview = async () => {
+      if (editInPlace) {
+        await editOrReply(ctx, text, {
+          parse_mode: 'HTML',
+          reply_markup: kb,
+          disable_web_page_preview: true
+        });
+        return;
+      }
+
+      if (data.photo_file_id && text.length <= MAX_TELEGRAM_CAPTION) {
+        try {
+          await ctx.replyWithPhoto(data.photo_file_id, {
+            caption: text,
+            parse_mode: 'HTML',
+            reply_markup: kb
+          });
+          return;
+        } catch (err) {}
+      }
+
+      await ctx.reply(text, {
         parse_mode: 'HTML',
         reply_markup: kb,
         disable_web_page_preview: true
       });
-      return;
-    }
+    };
 
-    if (data.photo_file_id && text.length <= MAX_TELEGRAM_CAPTION) {
-      try {
-        await ctx.replyWithPhoto(data.photo_file_id, {
-          caption: text,
-          parse_mode: 'HTML',
-          reply_markup: kb
-        });
-        return;
-      } catch (err) {}
-    }
-
-    await ctx.reply(text, {
-      parse_mode: 'HTML',
-      reply_markup: kb,
-      disable_web_page_preview: true
-    });
+    await Promise.all([
+      db.sessions.set(ctx.from.id, 'preview', data),
+      sendPreview()
+    ]);
   }
 
   async function sendCaptchaChallenge(ctx, g, refId = null) {
@@ -547,29 +638,68 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
     });
   }
 
-  async function refreshChannelPostCounter(g) {
-    if (!g.channel_post_chat_id || !g.channel_post_message_id) return;
-    try {
-      const count = await db.participants.count(g.id);
-      const postLang = resolvePostLang(g);
-      await bot.api.editMessageReplyMarkup(g.channel_post_chat_id, g.channel_post_message_id, {
-        reply_markup: buildPostActionKeyboard(
-          postLang,
-          g.public_id,
-          count,
-          g.required_channels,
-          g.settings,
-          getBotUsername({ botInfo: bot.botInfo }, explicitUsername)
-        )
-      });
-    } catch (err) {}
+  async function applyChannelPostMarkup(g, count) {
+    const postLang = resolvePostLang(g);
+    await bot.api.editMessageReplyMarkup(g.channel_post_chat_id, g.channel_post_message_id, {
+      reply_markup: buildPostActionKeyboard(
+        postLang,
+        g.public_id,
+        count,
+        g.required_channels,
+        g.settings,
+        getBotUsername({ botInfo: bot.botInfo }, explicitUsername)
+      )
+    });
   }
 
-  async function renderDmJoinView(ctx, g, refId = null) {
+  async function refreshChannelPostCounter(g, knownCount = undefined) {
+    if (!g.channel_post_chat_id || !g.channel_post_message_id) return;
+    const key = String(g.id);
+    const state = runtimeCaches.channelRefresh.get(key) || { lastEditAt: 0, pending: false };
+    runtimeCaches.channelRefresh.set(key, state);
+
+    const now = Date.now();
+    if (now - state.lastEditAt >= COUNTER_EDIT_DEBOUNCE_MS) {
+      state.lastEditAt = now;
+      try {
+        const count = knownCount !== undefined ? knownCount : await db.participants.count(g.id);
+        await applyChannelPostMarkup(g, count);
+      } catch (err) {}
+      return;
+    }
+
+    if (state.pending) return;
+    state.pending = true;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, COUNTER_EDIT_DEBOUNCE_MS));
+      state.pending = false;
+      state.lastEditAt = Date.now();
+      const latestCount = await db.participants.count(g.id);
+      await applyChannelPostMarkup(g, latestCount);
+    } catch (err) {
+      state.pending = false;
+    }
+  }
+
+  async function renderDmJoinView(ctx, g, refId = null, knownState = null) {
     const botUsername = ctx.botUsername;
-    const participantsCount = await db.participants.count(g.id);
-    const participantRow = ctx.from ? await db.participants.get(g.id, ctx.from.id) : null;
-    const isJoined = Boolean(participantRow);
+    let participantsCount;
+    let isJoined;
+    let extraTickets;
+
+    if (knownState) {
+      participantsCount = knownState.count;
+      isJoined = Boolean(knownState.isJoined);
+      extraTickets = Math.max(0, Number(knownState.extraTickets) || 0);
+    } else {
+      const [count, participantRow] = await Promise.all([
+        db.participants.count(g.id),
+        ctx.from ? db.participants.get(g.id, ctx.from.id) : null
+      ]);
+      participantsCount = count;
+      isJoined = Boolean(participantRow);
+      extraTickets = Math.max(0, Number(participantRow?.extra_tickets) || 0);
+    }
 
     let text = ctx.t('giveaway_card', {
       prize: g.prize,
@@ -591,11 +721,10 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
     });
 
     if (isJoined && g.settings?.referralsEnabled && ctx.from) {
-      const extra = Math.max(0, Number(participantRow.extra_tickets) || 0);
       const refLink = `https://t.me/${botUsername}?start=ref_${g.public_id}_${ctx.from.id}`;
       text += ctx.t('dm_ticket_info', {
-        tickets: 1 + extra,
-        referralsCount: extra,
+        tickets: 1 + extraTickets,
+        referralsCount: extraTickets,
         refLink
       });
       const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${encodeURIComponent(ctx.t('share_referral_text', g.prize))}`;
@@ -644,7 +773,9 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
 
   async function renderMyGiveawaysList(ctx, { edit = false } = {}) {
     if (!ctx.from) return;
-    const list = await db.giveaways.listByCreator(ctx.from.id);
+    const list = db.giveaways.listByCreatorWithCounts
+      ? await db.giveaways.listByCreatorWithCounts(ctx.from.id)
+      : await db.giveaways.listByCreator(ctx.from.id);
     if (!list || list.length === 0) {
       return ctx.reply(ctx.t('my_giveaways_empty'), {
         reply_markup: getMainMenuKeyboard(ctx.lang)
@@ -655,7 +786,7 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
     for (const g of list.slice(0, 10)) {
       const emoji =
         g.status === 'active' ? '🟢' : g.status === 'finished' ? '🏁' : g.status === 'cancelled' ? '❌' : '📝';
-      const cnt = await db.participants.count(g.id);
+      const cnt = g.participant_count !== undefined ? g.participant_count : await db.participants.count(g.id);
       const label = `${emoji} ${truncateText(g.prize, 28)} (${cnt})`;
       kb.text(label, `manage_${g.public_id}`).row();
     }
@@ -671,68 +802,94 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
 
   async function completeParticipantJoin(ctx, g, refId = null, { sendDmFollowup = false } = {}) {
     const userId = ctx.from.id;
-    await db.participants.add(g.id, userId, ctx.from.username, ctx.from.first_name, refId);
-    const participantRow = await db.participants.get(g.id, userId);
-    const myTickets = 1 + Math.max(0, Number(participantRow?.extra_tickets) || 0);
-    const newCount = await db.participants.count(g.id);
+    let extraTickets = 0;
+    let newCount = 0;
 
-    if (ctx.callbackQuery) {
-      await ctx.answerCallbackQuery({
-        text: ctx.t('alert_success_joined', myTickets, Boolean(g.settings?.referralsEnabled)),
-        show_alert: true
-      });
+    if (db.participants.joinFast) {
+      const res = await db.participants.joinFast(g.id, userId, ctx.from.username, ctx.from.first_name, refId);
+      extraTickets = res.extraTickets;
+      newCount = res.count;
+    } else {
+      await db.participants.add(g.id, userId, ctx.from.username, ctx.from.first_name, refId);
+      const [participantRow, count] = await Promise.all([
+        db.participants.get(g.id, userId),
+        db.participants.count(g.id)
+      ]);
+      extraTickets = Number(participantRow?.extra_tickets || 0);
+      newCount = count;
     }
 
-    await refreshChannelPostCounter(g);
-
+    const myTickets = 1 + Math.max(0, Number(extraTickets) || 0);
     const isDm = ctx.chat?.type === 'private' || ctx.callbackQuery?.message?.chat?.type === 'private';
-    if (isDm) {
-      if (sendDmFollowup) {
-        await renderDmJoinView(ctx, g, refId);
-      } else if (ctx.callbackQuery?.message) {
-        await renderDmJoinView(ctx, g, refId);
-      }
+
+    const uiTasks = [];
+    if (ctx.callbackQuery) {
+      uiTasks.push(
+        answerCb(ctx, {
+          text: ctx.t('alert_success_joined', myTickets, Boolean(g.settings?.referralsEnabled)),
+          show_alert: true
+        })
+      );
+    }
+    if (isDm && (sendDmFollowup || ctx.callbackQuery?.message)) {
+      uiTasks.push(
+        renderDmJoinView(ctx, g, refId, {
+          count: newCount,
+          extraTickets,
+          isJoined: true
+        })
+      );
     }
 
+    runBg(refreshChannelPostCounter(g, newCount));
     if (g.end_type === 'participants' && g.end_count > 0 && newCount >= g.end_count) {
-      await finalizeGiveaway(g.id);
+      runBg(finalizeGiveaway(g.id));
     }
+
+    await Promise.all(uiTasks);
   }
 
   async function finishStepPrompt(ctx, stepName, sessionData) {
-    await db.sessions.set(ctx.from.id, stepName, sessionData);
-    if (stepName === 'step_prize') {
-      return ctx.reply(ctx.t('wizard_step_prize'), {
-        parse_mode: 'HTML',
-        reply_markup: new InlineKeyboard().text(ctx.t('btn_cancel'), 'wizard_cancel')
-      });
-    }
-    if (stepName === 'step_desc') {
-      return ctx.reply(ctx.t('wizard_step_description'), {
-        parse_mode: 'HTML',
-        reply_markup: new InlineKeyboard()
-          .text(ctx.t('btn_skip'), 'wizard_skip_desc').row()
-          .text(ctx.t('btn_cancel'), 'wizard_cancel')
-      });
-    }
-    if (stepName === 'step_winners') {
-      return ctx.reply(ctx.t('wizard_step_winners'), {
-        parse_mode: 'HTML',
-        reply_markup: buildWinnersKeyboard(ctx.lang)
-      });
-    }
-    if (stepName === 'step_channels') {
-      return ctx.reply(ctx.t('wizard_step_channels'), {
-        parse_mode: 'HTML',
-        reply_markup: buildStepChannelsKeyboard(ctx.lang, sessionData.channels, ctx.botUsername)
-      });
-    }
-    if (stepName === 'step_duration') {
-      return ctx.reply(ctx.t('wizard_step_duration'), {
-        parse_mode: 'HTML',
-        reply_markup: buildDurationKeyboard(ctx.lang)
-      });
-    }
+    const replyTask = (() => {
+      if (stepName === 'step_prize') {
+        return ctx.reply(ctx.t('wizard_step_prize'), {
+          parse_mode: 'HTML',
+          reply_markup: new InlineKeyboard().text(ctx.t('btn_cancel'), 'wizard_cancel')
+        });
+      }
+      if (stepName === 'step_desc') {
+        return ctx.reply(ctx.t('wizard_step_description'), {
+          parse_mode: 'HTML',
+          reply_markup: new InlineKeyboard()
+            .text(ctx.t('btn_skip'), 'wizard_skip_desc').row()
+            .text(ctx.t('btn_cancel'), 'wizard_cancel')
+        });
+      }
+      if (stepName === 'step_winners') {
+        return ctx.reply(ctx.t('wizard_step_winners'), {
+          parse_mode: 'HTML',
+          reply_markup: buildWinnersKeyboard(ctx.lang)
+        });
+      }
+      if (stepName === 'step_channels') {
+        return ctx.reply(ctx.t('wizard_step_channels'), {
+          parse_mode: 'HTML',
+          reply_markup: buildStepChannelsKeyboard(ctx.lang, sessionData.channels, ctx.botUsername)
+        });
+      }
+      if (stepName === 'step_duration') {
+        return ctx.reply(ctx.t('wizard_step_duration'), {
+          parse_mode: 'HTML',
+          reply_markup: buildDurationKeyboard(ctx.lang)
+        });
+      }
+      return Promise.resolve();
+    })();
+
+    await Promise.all([
+      db.sessions.set(ctx.from.id, stepName, sessionData),
+      replyTask
+    ]);
   }
 
   // ==================== COMMANDS ====================
@@ -745,9 +902,20 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
 
     const refMatch = payload.match(/^ref_([a-f0-9]+)_(\d+)$/);
     if (refMatch) {
-      const g = await db.giveaways.getByPublicId(refMatch[1]);
-      if (g) {
-        return renderDmJoinView(ctx, g, Number(refMatch[2]));
+      if (ctx.from && db.giveaways.getWithParticipant) {
+        const info = await db.giveaways.getWithParticipant(refMatch[1], ctx.from.id);
+        if (info?.giveaway) {
+          return renderDmJoinView(ctx, info.giveaway, Number(refMatch[2]), {
+            count: info.participantsCount,
+            extraTickets: info.extraTickets,
+            isJoined: info.isJoined
+          });
+        }
+      } else {
+        const g = await db.giveaways.getByPublicId(refMatch[1]);
+        if (g) {
+          return renderDmJoinView(ctx, g, Number(refMatch[2]));
+        }
       }
     }
 
@@ -762,9 +930,20 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
 
     if (payload && payload.startsWith('join_')) {
       const publicId = payload.replace('join_', '');
-      const g = await db.giveaways.getByPublicId(publicId);
-      if (g) {
-        return renderDmJoinView(ctx, g, null);
+      if (ctx.from && db.giveaways.getWithParticipant) {
+        const info = await db.giveaways.getWithParticipant(publicId, ctx.from.id);
+        if (info?.giveaway) {
+          return renderDmJoinView(ctx, info.giveaway, null, {
+            count: info.participantsCount,
+            extraTickets: info.extraTickets,
+            isJoined: info.isJoined
+          });
+        }
+      } else {
+        const g = await db.giveaways.getByPublicId(publicId);
+        if (g) {
+          return renderDmJoinView(ctx, g, null);
+        }
       }
     }
 
@@ -777,10 +956,12 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
 
   bot.command('cancel', async (ctx) => {
     if (ctx.from) {
-      await db.sessions.clear(ctx.from.id);
-      await ctx.reply(ctx.t('cancelled'), {
-        reply_markup: getMainMenuKeyboard(ctx.lang)
-      });
+      await Promise.all([
+        db.sessions.clear(ctx.from.id),
+        ctx.reply(ctx.t('cancelled'), {
+          reply_markup: getMainMenuKeyboard(ctx.lang)
+        })
+      ]);
     }
   });
 
@@ -819,50 +1000,65 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
   bot.callbackQuery(/^set_lang_(en|ru)$/, async (ctx) => {
     const chosen = ctx.match[1];
     if (ctx.from) {
-      await db.users.setLang(ctx.from.id, chosen);
       ctx.lang = chosen;
-      await ctx.answerCallbackQuery();
-      await ctx.reply(t(chosen, 'lang_set'), {
-        reply_markup: getMainMenuKeyboard(chosen)
-      });
+      cacheUserEntry(ctx.from.id, chosen, Date.now());
+      await Promise.all([
+        db.users.setLang(ctx.from.id, chosen),
+        answerCb(ctx),
+        ctx.reply(t(chosen, 'lang_set'), {
+          reply_markup: getMainMenuKeyboard(chosen)
+        })
+      ]);
     }
   });
 
   bot.callbackQuery('menu_help', async (ctx) => {
-    await ctx.answerCallbackQuery();
-    await ctx.reply(ctx.t('help_text'), {
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-      reply_markup: new InlineKeyboard().text(ctx.t('btn_back'), 'menu_back')
-    });
+    await Promise.all([
+      answerCb(ctx),
+      ctx.reply(ctx.t('help_text'), {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: new InlineKeyboard().text(ctx.t('btn_back'), 'menu_back')
+      })
+    ]);
   });
 
   bot.callbackQuery('menu_lang', async (ctx) => {
-    await ctx.answerCallbackQuery();
-    await ctx.reply(ctx.t('choose_lang'), { reply_markup: getLanguageKeyboard(true) });
+    await Promise.all([
+      answerCb(ctx),
+      ctx.reply(ctx.t('choose_lang'), { reply_markup: getLanguageKeyboard(true) })
+    ]);
   });
 
   bot.callbackQuery('menu_back', async (ctx) => {
-    await ctx.answerCallbackQuery();
-    await sendWelcomeMenu(ctx);
+    await Promise.all([
+      answerCb(ctx),
+      sendWelcomeMenu(ctx)
+    ]);
   });
 
   bot.callbackQuery('menu_my', async (ctx) => {
-    await ctx.answerCallbackQuery();
-    await renderMyGiveawaysList(ctx, { edit: true });
+    await Promise.all([
+      answerCb(ctx),
+      renderMyGiveawaysList(ctx, { edit: true })
+    ]);
   });
 
   bot.callbackQuery('menu_create', async (ctx) => {
-    await ctx.answerCallbackQuery();
-    await startCreateWizard(ctx);
+    await Promise.all([
+      answerCb(ctx),
+      startCreateWizard(ctx)
+    ]);
   });
 
   bot.callbackQuery('wizard_cancel', async (ctx) => {
-    await ctx.answerCallbackQuery();
-    if (ctx.from) await db.sessions.clear(ctx.from.id);
-    await ctx.reply(ctx.t('cancelled'), {
-      reply_markup: getMainMenuKeyboard(ctx.lang)
-    });
+    await Promise.all([
+      answerCb(ctx),
+      ctx.from ? db.sessions.clear(ctx.from.id) : Promise.resolve(),
+      ctx.reply(ctx.t('cancelled'), {
+        reply_markup: getMainMenuKeyboard(ctx.lang)
+      })
+    ]);
   });
 
   // ==================== 1-TAP AUTO-DETECT CHANNEL PROMOTION ====================
@@ -1017,9 +1213,8 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
   // ==================== WIZARD CALLBACKS ====================
 
   bot.callbackQuery('wizard_skip_desc', async (ctx) => {
-    await ctx.answerCallbackQuery();
-    if (!ctx.from) return;
-    const session = await db.sessions.get(ctx.from.id);
+    if (!ctx.from) return answerCb(ctx);
+    const [session] = await Promise.all([db.sessions.get(ctx.from.id), answerCb(ctx)]);
     if (!session) return;
 
     session.data.description = '';
@@ -1031,118 +1226,128 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
   });
 
   bot.callbackQuery(/^win_cnt_(\d+)$/, async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
     session.data.winners_count = Math.min(Math.max(parseInt(ctx.match[1], 10), 1), 100);
-    if (session.data.returnToPreview) {
-      return showGiveawayPreview(ctx, session, { reuseSeed: true });
-    }
-    return finishStepPrompt(ctx, 'step_channels', session.data);
+    const nextTask = session.data.returnToPreview
+      ? showGiveawayPreview(ctx, session, { reuseSeed: true })
+      : finishStepPrompt(ctx, 'step_channels', session.data);
+    await Promise.all([answerCb(ctx), nextTask]);
   });
 
   bot.callbackQuery('wizard_done_channels', async (ctx) => {
-    await ctx.answerCallbackQuery();
-    if (!ctx.from) return;
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data.channels || session.data.channels.length === 0) {
-      return ctx.reply(ctx.t('need_at_least_one_channel'));
+      return Promise.all([answerCb(ctx), ctx.reply(ctx.t('need_at_least_one_channel'))]);
     }
-    if (session.data.returnToPreview && session.data.end_at) {
-      return showGiveawayPreview(ctx, session, { reuseSeed: true });
-    }
-    return finishStepPrompt(ctx, 'step_duration', session.data);
+    const nextTask =
+      session.data.returnToPreview && session.data.end_at
+        ? showGiveawayPreview(ctx, session, { reuseSeed: true })
+        : finishStepPrompt(ctx, 'step_duration', session.data);
+    await Promise.all([answerCb(ctx), nextTask]);
   });
 
   bot.callbackQuery('dur_custom', async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
-    await db.sessions.set(ctx.from.id, 'step_custom_date', session.data);
-    await ctx.reply(ctx.t('wizard_step_custom_date'), {
-      parse_mode: 'HTML',
-      reply_markup: new InlineKeyboard().text(ctx.t('btn_cancel'), 'wizard_cancel')
-    });
+    await Promise.all([
+      answerCb(ctx),
+      db.sessions.set(ctx.from.id, 'step_custom_date', session.data),
+      ctx.reply(ctx.t('wizard_step_custom_date'), {
+        parse_mode: 'HTML',
+        reply_markup: new InlineKeyboard().text(ctx.t('btn_cancel'), 'wizard_cancel')
+      })
+    ]);
   });
 
   bot.callbackQuery('dur_count', async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
-    await db.sessions.set(ctx.from.id, 'step_target_count', session.data);
-    await ctx.reply(ctx.t('wizard_step_count'), {
-      parse_mode: 'HTML',
-      reply_markup: buildTargetCountKeyboard(ctx.lang)
-    });
+    await Promise.all([
+      answerCb(ctx),
+      db.sessions.set(ctx.from.id, 'step_target_count', session.data),
+      ctx.reply(ctx.t('wizard_step_count'), {
+        parse_mode: 'HTML',
+        reply_markup: buildTargetCountKeyboard(ctx.lang)
+      })
+    ]);
   });
 
   bot.callbackQuery(/^cnt_(\d+)$/, async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
     session.data.end_type = 'participants';
     session.data.end_count = parseInt(ctx.match[1], 10);
     session.data.end_at = Date.now() + 365 * 86400000;
-    await showGiveawayPreview(ctx, session, { reuseSeed: Boolean(session.data.returnToPreview) });
+    await Promise.all([
+      answerCb(ctx),
+      showGiveawayPreview(ctx, session, { reuseSeed: Boolean(session.data.returnToPreview) })
+    ]);
   });
 
   bot.callbackQuery(/^dur_(\d+)$/, async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
 
     const durationMs = parseInt(ctx.match[1], 10);
     session.data.end_type = 'time';
     session.data.end_count = 0;
     session.data.end_at = Date.now() + durationMs;
-    await showGiveawayPreview(ctx, session, { reuseSeed: Boolean(session.data.returnToPreview) });
+    await Promise.all([
+      answerCb(ctx),
+      showGiveawayPreview(ctx, session, { reuseSeed: Boolean(session.data.returnToPreview) })
+    ]);
   });
 
   // ==================== PREVIEW EDITING & OPTIONS ====================
 
   bot.callbackQuery('preview_back', async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
-    await showGiveawayPreview(ctx, session, { reuseSeed: true, editInPlace: true });
+    await Promise.all([
+      answerCb(ctx),
+      showGiveawayPreview(ctx, session, { reuseSeed: true, editInPlace: true })
+    ]);
   });
 
   bot.callbackQuery('preview_toggle_lang', async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
     session.data.lang = session.data.lang === 'ru' ? 'en' : 'ru';
-    await showGiveawayPreview(ctx, session, { reuseSeed: true, editInPlace: true });
+    await Promise.all([
+      answerCb(ctx),
+      showGiveawayPreview(ctx, session, { reuseSeed: true, editInPlace: true })
+    ]);
   });
 
   bot.callbackQuery('preview_edit', async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
     const kb = new InlineKeyboard()
       .text(ctx.t('btn_edit_prize'), 'edit_field_prize')
       .text(ctx.t('btn_edit_desc'), 'edit_field_desc').row()
@@ -1151,16 +1356,18 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
       .text(ctx.t('btn_edit_duration'), 'edit_field_duration').row()
       .text(ctx.t('btn_back_preview'), 'preview_back');
 
-    await editOrReply(ctx, ctx.t('edit_menu_title'), { parse_mode: 'HTML', reply_markup: kb });
+    await Promise.all([
+      answerCb(ctx),
+      editOrReply(ctx, ctx.t('edit_menu_title'), { parse_mode: 'HTML', reply_markup: kb })
+    ]);
   });
 
   bot.callbackQuery(/^edit_field_(prize|desc|winners|channels|duration)$/, async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
     const field = ctx.match[1];
     session.data.returnToPreview = true;
     if (field === 'channels') {
@@ -1173,13 +1380,15 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
       channels: 'step_channels',
       duration: 'step_duration'
     };
-    await finishStepPrompt(ctx, stepMap[field], session.data);
+    await Promise.all([
+      answerCb(ctx),
+      finishStepPrompt(ctx, stepMap[field], session.data)
+    ]);
   });
 
   async function renderOptionsMenu(ctx, session) {
     const s = parseSettings(session.data.settings);
     session.data.settings = s;
-    await db.sessions.set(ctx.from.id, 'preview', session.data);
 
     const channels = session.data.channels || [];
     const postCh = channels[s.postChannelIndex || 0] || channels[0];
@@ -1195,26 +1404,30 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
     }
     kb.text(ctx.t('btn_back_preview'), 'preview_back');
 
-    await editOrReply(ctx, ctx.t('options_menu_title'), { parse_mode: 'HTML', reply_markup: kb });
+    await Promise.all([
+      db.sessions.set(ctx.from.id, 'preview', session.data),
+      editOrReply(ctx, ctx.t('options_menu_title'), { parse_mode: 'HTML', reply_markup: kb })
+    ]);
   }
 
   bot.callbackQuery('preview_options', async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
-    await renderOptionsMenu(ctx, session);
+    await Promise.all([
+      answerCb(ctx),
+      renderOptionsMenu(ctx, session)
+    ]);
   });
 
   bot.callbackQuery(/^opt_toggle_(referrals|captcha|username|premium)$/, async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
     const s = parseSettings(session.data.settings);
     const keyMap = {
       referrals: 'referralsEnabled',
@@ -1225,31 +1438,35 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
     const prop = keyMap[ctx.match[1]];
     s[prop] = !s[prop];
     session.data.settings = s;
-    await renderOptionsMenu(ctx, session);
+    await Promise.all([
+      answerCb(ctx),
+      renderOptionsMenu(ctx, session)
+    ]);
   });
 
   bot.callbackQuery('opt_cycle_post_channel', async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data || !session.data.channels?.length) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
     const s = parseSettings(session.data.settings);
     s.postChannelIndex = ((s.postChannelIndex || 0) + 1) % session.data.channels.length;
     session.data.settings = s;
-    await renderOptionsMenu(ctx, session);
+    await Promise.all([
+      answerCb(ctx),
+      renderOptionsMenu(ctx, session)
+    ]);
   });
 
   // ==================== PUBLISH GIVEAWAY ====================
 
   bot.callbackQuery('wizard_publish', async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const session = await db.sessions.get(ctx.from.id);
     if (!session || !session.data || !session.data.channels || session.data.channels.length === 0) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
 
     const d = session.data;
     const postLang = d.lang === 'ru' ? 'ru' : (d.lang === 'en' ? 'en' : ctx.lang);
@@ -1275,26 +1492,28 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
     const captionText = t(postLang, 'giveaway_card', { ...baseCardParams, forCaption: true });
     const postKb = buildPostActionKeyboard(postLang, d.public_id, 0, d.channels, settings, ctx.botUsername);
 
-    const giveawayId = await db.giveaways.create({
-      public_id: d.public_id,
-      creator_id: ctx.from.id,
-      prize: d.prize,
-      description: d.description,
-      winners_count: d.winners_count,
-      required_channels: d.channels,
-      target_chat_id: String(targetChannel.id),
-      status: 'draft',
-      end_type: d.end_type || 'time',
-      end_at: d.end_at,
-      end_count: d.end_count || 0,
-      seed_hash: d.seed_hash,
-      server_seed: d.server_seed,
-      lang: postLang,
-      photo_file_id: d.photo_file_id || null,
-      settings
-    });
-
-    await db.sessions.clear(ctx.from.id);
+    const [giveawayId] = await Promise.all([
+      db.giveaways.create({
+        public_id: d.public_id,
+        creator_id: ctx.from.id,
+        prize: d.prize,
+        description: d.description,
+        winners_count: d.winners_count,
+        required_channels: d.channels,
+        target_chat_id: String(targetChannel.id),
+        status: 'draft',
+        end_type: d.end_type || 'time',
+        end_at: d.end_at,
+        end_count: d.end_count || 0,
+        seed_hash: d.seed_hash,
+        server_seed: d.server_seed,
+        lang: postLang,
+        photo_file_id: d.photo_file_id || null,
+        settings
+      }),
+      db.sessions.clear(ctx.from.id),
+      answerCb(ctx)
+    ]);
 
     try {
       const { sentMsg, usedPhoto } = await sendChannelGiveawayPost(
@@ -1306,70 +1525,110 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
         postKb
       );
       settings.hasPhoto = usedPhoto;
-      await db.giveaways.updatePostDetails(giveawayId, targetChannel.id, sentMsg.message_id, settings);
-
       const postUrl = buildChannelPostUrl(targetChannel, targetChannel.id, sentMsg.message_id);
-      await ctx.reply(ctx.t('publish_success', targetLabel, postUrl), {
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-        reply_markup: getMainMenuKeyboard(ctx.lang)
-      });
+      await Promise.all([
+        db.giveaways.updatePostDetails(giveawayId, targetChannel.id, sentMsg.message_id, settings),
+        ctx.reply(ctx.t('publish_success', targetLabel, postUrl), {
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+          reply_markup: getMainMenuKeyboard(ctx.lang)
+        })
+      ]);
     } catch (err) {
       console.error('Failed to publish to channel:', err);
-      await db.giveaways.cancel(giveawayId);
-      await ctx.reply(ctx.t('publish_failed', targetLabel), {
-        parse_mode: 'HTML',
-        reply_markup: getMainMenuKeyboard(ctx.lang)
-      });
+      await Promise.all([
+        db.giveaways.cancel(giveawayId),
+        ctx.reply(ctx.t('publish_failed', targetLabel), {
+          parse_mode: 'HTML',
+          reply_markup: getMainMenuKeyboard(ctx.lang)
+        })
+      ]);
     }
   });
 
   // ==================== PARTICIPATE / REFERRAL / CAPTCHA ====================
 
+  async function checkMissingChannels(api, channels, userId) {
+    if (!Array.isArray(channels) || channels.length === 0) return [];
+    const checks = await Promise.all(
+      channels.map(async (ch) => ({
+        ch,
+        ok: await isUserSubscribed(api, ch.id, userId)
+      }))
+    );
+    return checks.filter((r) => !r.ok).map((r) => `• ${formatChannelLabel(r.ch)}`);
+  }
+
   bot.callbackQuery(/^join_([a-f0-9]+)(?:_r(\d+))?$/, async (ctx) => {
     const publicId = ctx.match[1];
     const refId = ctx.match[2] ? Number(ctx.match[2]) : null;
-    const g = await getOrRecoverGiveaway(db, publicId, ctx.callbackQuery?.message, defaultLang);
+    const userId = ctx.from.id;
+
+    let g = null;
+    let alreadyIn = false;
+    let knownExtraTickets = 0;
+    let knownReferredBy = null;
+
+    if (db.giveaways.getWithParticipant) {
+      const joinState = await db.giveaways.getWithParticipant(publicId, userId);
+      if (joinState?.giveaway) {
+        g = joinState.giveaway;
+        alreadyIn = joinState.isJoined;
+        knownExtraTickets = joinState.extraTickets;
+        knownReferredBy = joinState.referredBy;
+      }
+    }
+    if (!g) {
+      g = await getOrRecoverGiveaway(db, publicId, ctx.callbackQuery?.message, defaultLang);
+      if (g) {
+        alreadyIn = await db.participants.isParticipating(g.id, userId);
+      }
+    }
 
     if (!g) {
-      return ctx.answerCallbackQuery({ text: 'Giveaway not found.', show_alert: true });
+      return answerCb(ctx, { text: 'Giveaway not found.', show_alert: true });
     }
     if (g.status === 'cancelled') {
-      return ctx.answerCallbackQuery({ text: ctx.t('alert_cancelled'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('alert_cancelled'), show_alert: true });
     }
     if (g.status === 'finished' || g.status === 'finalizing') {
-      return ctx.answerCallbackQuery({ text: ctx.t('alert_ended'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('alert_ended'), show_alert: true });
     }
 
-    const userId = ctx.from.id;
-    const alreadyIn = await db.participants.isParticipating(g.id, userId);
-
     if (alreadyIn) {
-      await db.participants.remove(g.id, userId);
-      await ctx.answerCallbackQuery({ text: ctx.t('alert_left_giveaway'), show_alert: true });
-      await refreshChannelPostCounter(g);
-      if (ctx.callbackQuery?.message?.chat?.type === 'private') {
-        await renderDmJoinView(ctx, g, refId);
+      let newCount;
+      if (db.participants.removeFast) {
+        const res = await db.participants.removeFast(g.id, userId, knownReferredBy);
+        newCount = res.count;
+      } else {
+        await db.participants.remove(g.id, userId);
       }
+
+      runBg(refreshChannelPostCounter(g, newCount));
+      const uiTasks = [answerCb(ctx, { text: ctx.t('alert_left_giveaway'), show_alert: true })];
+      if (ctx.callbackQuery?.message?.chat?.type === 'private') {
+        uiTasks.push(
+          renderDmJoinView(ctx, g, refId, {
+            count: newCount !== undefined ? newCount : await db.participants.count(g.id),
+            extraTickets: knownExtraTickets,
+            isJoined: false
+          })
+        );
+      }
+      await Promise.all(uiTasks);
       return;
     }
 
     if (g.settings?.requireUsername && !ctx.from.username) {
-      return ctx.answerCallbackQuery({ text: ctx.t('alert_need_username'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('alert_need_username'), show_alert: true });
     }
     if (g.settings?.requirePremium && !ctx.from.is_premium) {
-      return ctx.answerCallbackQuery({ text: ctx.t('alert_need_premium'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('alert_need_premium'), show_alert: true });
     }
 
-    const missing = [];
-    for (const ch of g.required_channels) {
-      if (!(await isUserSubscribed(ctx.api, ch.id, userId))) {
-        missing.push(`• ${formatChannelLabel(ch)}`);
-      }
-    }
-
+    const missing = await checkMissingChannels(ctx.api, g.required_channels, userId);
     if (missing.length > 0) {
-      return ctx.answerCallbackQuery({
+      return answerCb(ctx, {
         text: ctx.t('alert_must_subscribe', missing.join('\n')),
         show_alert: true
       });
@@ -1379,12 +1638,12 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
       const isPrivate = ctx.callbackQuery?.message?.chat?.type === 'private';
       if (!isPrivate) {
         const refParam = refId ? `_${refId}` : '';
-        return ctx.answerCallbackQuery({
+        return answerCb(ctx, {
           url: `https://t.me/${ctx.botUsername}?start=captcha_${g.public_id}${refParam}`
         });
       }
-      await ctx.answerCallbackQuery();
-      return sendCaptchaChallenge(ctx, g, refId);
+      await Promise.all([answerCb(ctx), sendCaptchaChallenge(ctx, g, refId)]);
+      return;
     }
 
     await completeParticipantJoin(ctx, g, refId);
@@ -1396,27 +1655,26 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
     const expected = Number(expectedStr);
     const refId = refStr ? Number(refStr) : null;
 
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const expectedSig = signCaptchaToken(token, ctx.from.id, publicId, expected).slice(0, 8);
     if (sig !== expectedSig) {
-      return ctx.answerCallbackQuery({ text: ctx.t('session_expired'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('session_expired'), show_alert: true });
     }
     if (choice !== expected) {
-      return ctx.answerCallbackQuery({ text: ctx.t('captcha_wrong'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('captcha_wrong'), show_alert: true });
     }
 
     const g = await db.giveaways.getByPublicId(publicId);
     if (!g || g.status !== 'active') {
-      return ctx.answerCallbackQuery({ text: ctx.t('alert_ended'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('alert_ended'), show_alert: true });
     }
 
-    for (const ch of g.required_channels) {
-      if (!(await isUserSubscribed(ctx.api, ch.id, ctx.from.id))) {
-        return ctx.answerCallbackQuery({
-          text: ctx.t('alert_must_subscribe', `• ${formatChannelLabel(ch)}`),
-          show_alert: true
-        });
-      }
+    const missing = await checkMissingChannels(ctx.api, g.required_channels, ctx.from.id);
+    if (missing.length > 0) {
+      return answerCb(ctx, {
+        text: ctx.t('alert_must_subscribe', missing.join('\n')),
+        show_alert: true
+      });
     }
 
     await completeParticipantJoin(ctx, g, refId, { sendDmFollowup: true });
@@ -1424,8 +1682,11 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
 
   bot.callbackQuery(/^stats_([a-f0-9]+)$/, async (ctx) => {
     const publicId = ctx.match[1];
-    const g = await getOrRecoverGiveaway(db, publicId, ctx.callbackQuery?.message, defaultLang);
-    if (!g) return ctx.answerCallbackQuery();
+    const [g] = await Promise.all([
+      getOrRecoverGiveaway(db, publicId, ctx.callbackQuery?.message, defaultLang),
+      answerCb(ctx)
+    ]);
+    if (!g) return;
 
     const participants = await db.participants.listForGiveaway(g.id);
     const count = participants.length;
@@ -1435,7 +1696,6 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
         ? (ctx.lang === 'ru' ? `${g.end_count} участ.` : `${g.end_count} participants`)
         : formatDate(g.end_at, ctx.lang);
 
-    await ctx.answerCallbackQuery();
     await ctx.reply(
       ctx.t('stats_popup', {
         count,
@@ -1451,17 +1711,15 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
   // ==================== CREATOR MANAGEMENT PANEL ====================
 
   bot.callbackQuery(/^manage_([a-f0-9]+)$/, async (ctx) => {
-    await ctx.answerCallbackQuery();
-    if (!ctx.from) return;
-    const g = await db.giveaways.getByPublicId(ctx.match[1]);
+    if (!ctx.from) return answerCb(ctx);
+    const [g] = await Promise.all([db.giveaways.getByPublicId(ctx.match[1]), answerCb(ctx)]);
     if (!g || String(g.creator_id) !== String(ctx.from.id)) return;
     await renderManagePanel(ctx, g, { edit: true });
   });
 
   bot.callbackQuery(/^early_([a-f0-9]+)$/, async (ctx) => {
-    await ctx.answerCallbackQuery();
-    if (!ctx.from) return;
-    const g = await db.giveaways.getByPublicId(ctx.match[1]);
+    if (!ctx.from) return answerCb(ctx);
+    const [g] = await Promise.all([db.giveaways.getByPublicId(ctx.match[1]), answerCb(ctx)]);
     if (!g || String(g.creator_id) !== String(ctx.from.id)) return;
     if (g.status !== 'active') return;
     await finalizeGiveaway(g.id);
@@ -1470,45 +1728,45 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
   });
 
   bot.callbackQuery(/^cancel_g_([a-f0-9]+)$/, async (ctx) => {
-    await ctx.answerCallbackQuery();
-    if (!ctx.from) return;
-    const g = await db.giveaways.getByPublicId(ctx.match[1]);
+    if (!ctx.from) return answerCb(ctx);
+    const [g] = await Promise.all([db.giveaways.getByPublicId(ctx.match[1]), answerCb(ctx)]);
     if (!g || String(g.creator_id) !== String(ctx.from.id)) return;
     if (g.status !== 'active') return;
 
-    await db.giveaways.cancel(g.id);
     const postLang = resolvePostLang(g);
     const cancelCard = t(postLang, 'giveaway_cancelled_card', g.prize);
-    await editChannelPost(ctx.api, g, cancelCard, cancelCard, new InlineKeyboard());
-    const updated = await db.giveaways.getById(g.id);
-    if (updated) await renderManagePanel(ctx, updated, { edit: true });
+    await Promise.all([
+      db.giveaways.cancel(g.id),
+      editChannelPost(ctx.api, g, cancelCard, cancelCard, new InlineKeyboard())
+    ]);
+    g.status = 'cancelled';
+    await renderManagePanel(ctx, g, { edit: true });
   });
 
   bot.callbackQuery(/^export_([a-f0-9]+)$/, async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const g = await db.giveaways.getByPublicId(ctx.match[1]);
     if (!g || String(g.creator_id) !== String(ctx.from.id)) {
-      return ctx.answerCallbackQuery();
+      return answerCb(ctx);
     }
     const participants = await db.participants.listForGiveaway(g.id);
     if (!participants.length) {
-      return ctx.answerCallbackQuery({ text: ctx.t('export_empty'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('export_empty'), show_alert: true });
     }
-    await ctx.answerCallbackQuery();
     const csv = buildParticipantsCsv(participants);
     const bytes = new TextEncoder().encode(csv);
-    await ctx.replyWithDocument(new InputFile(bytes, `giveaway_${g.public_id}_participants.csv`), {
-      caption: ctx.t('export_caption', g.prize, participants.length)
-    });
+    await Promise.all([
+      answerCb(ctx),
+      ctx.replyWithDocument(new InputFile(bytes, `giveaway_${g.public_id}_participants.csv`), {
+        caption: ctx.t('export_caption', g.prize, participants.length)
+      })
+    ]);
   });
 
   bot.callbackQuery(/^clone_([a-f0-9]+)$/, async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
-    const g = await db.giveaways.getByPublicId(ctx.match[1]);
-    if (!g || String(g.creator_id) !== String(ctx.from.id)) {
-      return ctx.answerCallbackQuery();
-    }
-    await ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
+    const [g] = await Promise.all([db.giveaways.getByPublicId(ctx.match[1]), answerCb(ctx)]);
+    if (!g || String(g.creator_id) !== String(ctx.from.id)) return;
 
     const clonedEndAt =
       g.end_type === 'participants'
@@ -1533,10 +1791,10 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
   });
 
   bot.callbackQuery(/^reroll_([a-f0-9]+)$/, async (ctx) => {
-    if (!ctx.from) return ctx.answerCallbackQuery();
+    if (!ctx.from) return answerCb(ctx);
     const g = await db.giveaways.getByPublicId(ctx.match[1]);
     if (!g || String(g.creator_id) !== String(ctx.from.id) || g.status !== 'finished') {
-      return ctx.answerCallbackQuery();
+      return answerCb(ctx);
     }
 
     const participants = await db.participants.listForGiveaway(g.id);
@@ -1547,27 +1805,18 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
     let nextWinner = null;
     for (const cand of candidateOrder) {
       if (alreadyIds.has(String(cand.user_id))) continue;
-      let stillSub = true;
-      for (const ch of g.required_channels) {
-        if (!(await isUserSubscribed(ctx.api, ch.id, cand.user_id))) {
-          stillSub = false;
-          break;
-        }
-      }
-      if (stillSub) {
+      const missing = await checkMissingChannels(ctx.api, g.required_channels, cand.user_id);
+      if (missing.length === 0) {
         nextWinner = cand;
         break;
       }
     }
 
     if (!nextWinner) {
-      return ctx.answerCallbackQuery({ text: ctx.t('alert_reroll_none'), show_alert: true });
+      return answerCb(ctx, { text: ctx.t('alert_reroll_none'), show_alert: true });
     }
 
     const updatedWinners = [...currentWinners, nextWinner];
-    await db.giveaways.updateWinners(g.id, updatedWinners);
-    await ctx.answerCallbackQuery();
-
     const postLang = resolvePostLang(g);
     const winnerHandle = formatWinnerHandle(nextWinner);
     const winnersText = updatedWinners.map((w, idx) => `${idx + 1}. ${formatWinnerHandle(w)}`).join('\n');
@@ -1583,26 +1832,26 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
       .url(t(postLang, 'btn_verify_seed'), `${WEB_URL}/?seed=${encodeURIComponent(g.server_seed)}#verify`).row()
       .url(t(postLang, 'btn_create_own'), `${BOT_URL}?start=create`);
 
-    await editChannelPost(
-      ctx.api,
-      g,
-      t(postLang, 'giveaway_finished_card', { ...cardParams, forCaption: false }),
-      t(postLang, 'giveaway_finished_card', { ...cardParams, forCaption: true }),
-      finishKb
-    );
-
-    if (g.channel_post_chat_id && g.channel_post_message_id) {
-      try {
-        await bot.api.sendMessage(
-          g.channel_post_chat_id,
-          t(postLang, 'channel_reroll_reply', g.prize, winnerHandle),
-          { parse_mode: 'HTML', reply_to_message_id: g.channel_post_message_id }
-        );
-      } catch (err) {}
-    }
-
-    await notifyWinnerDm(g, nextWinner);
-    await ctx.reply(ctx.t('reroll_done', winnerHandle), { parse_mode: 'HTML' });
+    await Promise.all([
+      db.giveaways.updateWinners(g.id, updatedWinners),
+      answerCb(ctx),
+      editChannelPost(
+        ctx.api,
+        g,
+        t(postLang, 'giveaway_finished_card', { ...cardParams, forCaption: false }),
+        t(postLang, 'giveaway_finished_card', { ...cardParams, forCaption: true }),
+        finishKb
+      ),
+      g.channel_post_chat_id && g.channel_post_message_id
+        ? bot.api.sendMessage(
+            g.channel_post_chat_id,
+            t(postLang, 'channel_reroll_reply', g.prize, winnerHandle),
+            { parse_mode: 'HTML', reply_to_message_id: g.channel_post_message_id }
+          ).catch(() => {})
+        : Promise.resolve(),
+      notifyWinnerDm(g, nextWinner),
+      ctx.reply(ctx.t('reroll_done', winnerHandle), { parse_mode: 'HTML' })
+    ]);
   });
 
   // ==================== FINALIZATION ENGINE ====================
@@ -1635,10 +1884,12 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
     return { channelTitle, contactUrl, contactLabel };
   }
 
-  async function notifyWinnerDm(g, winner) {
+  async function notifyWinnerDm(g, winner, preResolvedContact = null) {
     try {
-      const { channelTitle, contactUrl, contactLabel } = await resolveContactForGiveaway(g);
-      const userObj = await db.users.get(winner.user_id);
+      const [{ channelTitle, contactUrl, contactLabel }, userObj] = await Promise.all([
+        preResolvedContact ? Promise.resolve(preResolvedContact) : resolveContactForGiveaway(g),
+        db.users.get(winner.user_id)
+      ]);
       const userLang = userObj?.lang === 'ru' ? 'ru' : resolvePostLang(g);
       const dmText = t(userLang, 'winner_dm_notification', {
         prize: g.prize,
@@ -1688,14 +1939,8 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
       const verifiedWinners = [];
       for (const candidate of candidateWinners) {
         if (verifiedWinners.length >= g.winners_count) break;
-        let stillSubscribed = true;
-        for (const ch of g.required_channels) {
-          if (!(await isUserSubscribed(bot.api, ch.id, candidate.user_id))) {
-            stillSubscribed = false;
-            break;
-          }
-        }
-        if (stillSubscribed) {
+        const missing = await checkMissingChannels(bot.api, g.required_channels, candidate.user_id);
+        if (missing.length === 0) {
           verifiedWinners.push(candidate);
         }
       }
@@ -1716,43 +1961,40 @@ function createBot({ token, db, defaultLang = 'en', botInfo = undefined, botUser
         .url(t(postLang, 'btn_verify_seed'), `${WEB_URL}/?seed=${encodeURIComponent(g.server_seed)}#verify`).row()
         .url(t(postLang, 'btn_create_own'), `${BOT_URL}?start=create`);
 
-      await editChannelPost(
-        bot.api,
-        g,
-        t(postLang, 'giveaway_finished_card', { ...cardParams, forCaption: false }),
-        t(postLang, 'giveaway_finished_card', { ...cardParams, forCaption: true }),
-        finishKb
-      );
+      const contactInfo = await resolveContactForGiveaway(g);
 
-      if (g.channel_post_chat_id && g.channel_post_message_id) {
-        try {
-          await bot.api.sendMessage(
-            g.channel_post_chat_id,
-            t(postLang, 'channel_winners_reply', g.prize, winnersText || t(postLang, 'no_participants')),
-            {
-              parse_mode: 'HTML',
-              reply_markup: finishKb,
-              reply_to_message_id: g.channel_post_message_id
-            }
-          );
-        } catch (err) {}
-      }
-
-      for (const w of verifiedWinners) {
-        await notifyWinnerDm(g, w);
-      }
-
-      if (g.creator_id) {
-        try {
-          const creatorObj = await db.users.get(g.creator_id);
-          const creatorLang = creatorObj?.lang === 'ru' ? 'ru' : postLang;
-          await bot.api.sendMessage(
-            g.creator_id,
-            t(creatorLang, 'creator_finish_dm', g.prize, winnersText),
-            { parse_mode: 'HTML' }
-          );
-        } catch (creatorErr) {}
-      }
+      await Promise.all([
+        editChannelPost(
+          bot.api,
+          g,
+          t(postLang, 'giveaway_finished_card', { ...cardParams, forCaption: false }),
+          t(postLang, 'giveaway_finished_card', { ...cardParams, forCaption: true }),
+          finishKb
+        ),
+        g.channel_post_chat_id && g.channel_post_message_id
+          ? bot.api.sendMessage(
+              g.channel_post_chat_id,
+              t(postLang, 'channel_winners_reply', g.prize, winnersText || t(postLang, 'no_participants')),
+              {
+                parse_mode: 'HTML',
+                reply_markup: finishKb,
+                reply_to_message_id: g.channel_post_message_id
+              }
+            ).catch(() => {})
+          : Promise.resolve(),
+        ...verifiedWinners.map((w) => notifyWinnerDm(g, w, contactInfo)),
+        g.creator_id
+          ? (async () => {
+              const creatorObj = await db.users.get(g.creator_id);
+              const creatorLang = creatorObj?.lang === 'ru' ? 'ru' : postLang;
+              await bot.api.sendMessage(
+                g.creator_id,
+                t(creatorLang, 'creator_finish_dm', g.prize, winnersText),
+                { parse_mode: 'HTML' }
+              );
+            })().catch(() => {})
+          : Promise.resolve()
+      ]);
     } catch (err) {
       if (!finishedPersisted && db.giveaways.releaseFinishClaim) {
         await db.giveaways.releaseFinishClaim(giveawayId);

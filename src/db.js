@@ -87,7 +87,14 @@ ensureColumn('giveaways', 'photo_file_id', 'TEXT');
 ensureColumn('giveaways', 'settings_json', "TEXT DEFAULT '{}'");
 ensureColumn('participants', 'extra_tickets', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('participants', 'referred_by', 'INTEGER');
-db.exec('CREATE INDEX IF NOT EXISTS idx_participants_referred_by ON participants(giveaway_id, referred_by);');
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_participants_referred_by ON participants(giveaway_id, referred_by);
+  CREATE INDEX IF NOT EXISTS idx_giveaways_creator_id ON giveaways(creator_id);
+  CREATE INDEX IF NOT EXISTS idx_giveaways_seed_hash ON giveaways(seed_hash);
+  CREATE INDEX IF NOT EXISTS idx_users_last_active ON users(last_active_at);
+  CREATE INDEX IF NOT EXISTS idx_participants_joined_at ON participants(joined_at);
+  CREATE INDEX IF NOT EXISTS idx_giveaways_created_at ON giveaways(created_at);
+`);
 
 const userQueries = {
   get: db.prepare('SELECT * FROM users WHERE user_id = ?'),
@@ -133,7 +140,25 @@ const giveawayQueries = {
   `),
   updateWinners: db.prepare('UPDATE giveaways SET winners_json = ? WHERE id = ?'),
   cancel: db.prepare("UPDATE giveaways SET status = 'cancelled', finished_at = ? WHERE id = ? AND status IN ('active', 'draft')"),
-  listByCreator: db.prepare('SELECT * FROM giveaways WHERE creator_id = ? ORDER BY id DESC LIMIT 20')
+  listByCreator: db.prepare('SELECT * FROM giveaways WHERE creator_id = ? ORDER BY id DESC LIMIT 20'),
+  listByCreatorWithCounts: db.prepare(`
+    SELECT g.*, (SELECT COUNT(*) FROM participants p WHERE p.giveaway_id = g.id) AS participant_count
+    FROM giveaways g
+    WHERE g.creator_id = ?
+    ORDER BY g.id DESC
+    LIMIT 20
+  `),
+  getWithParticipant: db.prepare(`
+    SELECT
+      g.*,
+      p.user_id AS _p_user_id,
+      p.extra_tickets AS _p_extra_tickets,
+      p.referred_by AS _p_referred_by,
+      (SELECT COUNT(*) FROM participants WHERE giveaway_id = g.id) AS _p_count
+    FROM giveaways g
+    LEFT JOIN participants p ON p.giveaway_id = g.id AND p.user_id = ?
+    WHERE g.public_id = ?
+  `)
 };
 
 const participantQueries = {
@@ -365,7 +390,34 @@ module.exports = {
     releaseFinishClaim: (id) => {
       db.prepare("UPDATE giveaways SET status = 'active' WHERE id = ? AND status = 'finalizing'").run(id);
     },
-    listByCreator: (creatorId) => giveawayQueries.listByCreator.all(creatorId).map((g) => parseGiveawayRow(g, config.DEFAULT_LANG))
+    listByCreator: (creatorId) => giveawayQueries.listByCreator.all(creatorId).map((g) => parseGiveawayRow(g, config.DEFAULT_LANG)),
+    listByCreatorWithCounts: (creatorId) =>
+      giveawayQueries.listByCreatorWithCounts.all(creatorId).map((row) => {
+        const count = Number(row.participant_count || 0);
+        delete row.participant_count;
+        const parsed = parseGiveawayRow(row, config.DEFAULT_LANG);
+        parsed.participant_count = count;
+        return parsed;
+      }),
+    getWithParticipant: (publicId, userId) => {
+      const row = giveawayQueries.getWithParticipant.get(userId, publicId);
+      if (!row) return null;
+      const isJoined = row._p_user_id != null;
+      const extraTickets = Number(row._p_extra_tickets || 0);
+      const referredBy = row._p_referred_by != null ? Number(row._p_referred_by) : null;
+      const participantsCount = Number(row._p_count || 0);
+      delete row._p_user_id;
+      delete row._p_extra_tickets;
+      delete row._p_referred_by;
+      delete row._p_count;
+      return {
+        giveaway: parseGiveawayRow(row, config.DEFAULT_LANG),
+        isJoined,
+        extraTickets,
+        referredBy,
+        participantsCount
+      };
+    }
   },
   participants: {
     get: (giveawayId, userId) => participantQueries.get.get(giveawayId, userId) || null,
@@ -392,6 +444,36 @@ module.exports = {
       }
       return res.changes > 0;
     },
+    joinFast: (giveawayId, userId, username, firstName, referredBy = null) => {
+      let validReferrer = null;
+      if (referredBy && String(referredBy) !== String(userId)) {
+        if (participantQueries.isParticipating.get(giveawayId, referredBy)) {
+          validReferrer = Number(referredBy);
+        }
+      }
+      const res = participantQueries.add.run(
+        giveawayId,
+        userId,
+        username || null,
+        firstName || '',
+        Date.now(),
+        validReferrer
+      );
+      const added = res.changes > 0;
+      if (added) {
+        if (validReferrer) {
+          participantQueries.syncReferrerTickets.run(giveawayId, validReferrer, giveawayId, validReferrer);
+        }
+        notifyChange();
+      }
+      const selfRow = participantQueries.get.get(giveawayId, userId);
+      const countRow = participantQueries.count.get(giveawayId);
+      return {
+        added,
+        extraTickets: Number(selfRow?.extra_tickets || 0),
+        count: Number(countRow?.cnt || 0)
+      };
+    },
     remove: (giveawayId, userId) => {
       const existing = participantQueries.get.get(giveawayId, userId);
       const res = participantQueries.remove.run(giveawayId, userId);
@@ -402,6 +484,21 @@ module.exports = {
         notifyChange();
       }
       return res.changes > 0;
+    },
+    removeFast: (giveawayId, userId, knownReferredBy = undefined) => {
+      const refId = knownReferredBy !== undefined
+        ? knownReferredBy
+        : participantQueries.get.get(giveawayId, userId)?.referred_by || null;
+      const res = participantQueries.remove.run(giveawayId, userId);
+      const removed = res.changes > 0;
+      if (removed) {
+        if (refId) {
+          participantQueries.syncReferrerTickets.run(giveawayId, refId, giveawayId, refId);
+        }
+        notifyChange();
+      }
+      const countRow = participantQueries.count.get(giveawayId);
+      return { removed, count: Number(countRow?.cnt || 0) };
     },
     count: (giveawayId) => {
       const res = participantQueries.count.get(giveawayId);

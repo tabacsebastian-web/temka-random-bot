@@ -51,23 +51,22 @@ function createD1Database(d1, defaultLang = 'en') {
     stats: {
       getPublicStats: async () => {
         const since = Date.now() - 30 * 86400000;
-        const [activeRow, giveawaysRow, participantsRow] = await Promise.all([
-          d1.prepare(`
-            SELECT COUNT(*) AS cnt FROM (
+        const row = await d1.prepare(`
+          SELECT
+            (SELECT COUNT(*) FROM (
               SELECT user_id AS uid FROM users WHERE COALESCE(last_active_at, created_at, 0) >= ?
               UNION
               SELECT user_id AS uid FROM participants WHERE joined_at >= ?
               UNION
               SELECT creator_id AS uid FROM giveaways WHERE created_at >= ? AND creator_id > 0
-            )
-          `).bind(since, since, since).first(),
-          d1.prepare('SELECT COUNT(*) AS cnt FROM giveaways').first(),
-          d1.prepare('SELECT COUNT(*) AS cnt FROM participants').first()
-        ]);
+            )) AS active_users,
+            (SELECT COUNT(*) FROM giveaways) AS total_giveaways,
+            (SELECT COUNT(*) FROM participants) AS total_participants
+        `).bind(since, since, since).first();
         return {
-          activeUsers30d: Number(activeRow?.cnt || 0),
-          totalGiveaways: Number(giveawaysRow?.cnt || 0),
-          totalParticipants: Number(participantsRow?.cnt || 0)
+          activeUsers30d: Number(row?.active_users || 0),
+          totalGiveaways: Number(row?.total_giveaways || 0),
+          totalParticipants: Number(row?.total_participants || 0)
         };
       }
     },
@@ -191,6 +190,59 @@ function createD1Database(d1, defaultLang = 'en') {
           .bind(creatorId)
           .all();
         return (res.results || []).map((row) => parseGiveawayRow(row, defaultLang));
+      },
+
+      listByCreatorWithCounts: async (creatorId) => {
+        const res = await d1
+          .prepare(`
+            SELECT g.*, (SELECT COUNT(*) FROM participants p WHERE p.giveaway_id = g.id) AS participant_count
+            FROM giveaways g
+            WHERE g.creator_id = ?
+            ORDER BY g.id DESC
+            LIMIT 20
+          `)
+          .bind(creatorId)
+          .all();
+        return (res.results || []).map((row) => {
+          const count = Number(row.participant_count || 0);
+          delete row.participant_count;
+          const parsed = parseGiveawayRow(row, defaultLang);
+          parsed.participant_count = count;
+          return parsed;
+        });
+      },
+
+      getWithParticipant: async (publicId, userId) => {
+        const row = await d1
+          .prepare(`
+            SELECT
+              g.*,
+              p.user_id AS _p_user_id,
+              p.extra_tickets AS _p_extra_tickets,
+              p.referred_by AS _p_referred_by,
+              (SELECT COUNT(*) FROM participants WHERE giveaway_id = g.id) AS _p_count
+            FROM giveaways g
+            LEFT JOIN participants p ON p.giveaway_id = g.id AND p.user_id = ?
+            WHERE g.public_id = ?
+          `)
+          .bind(userId, publicId)
+          .first();
+        if (!row) return null;
+        const isJoined = row._p_user_id != null;
+        const extraTickets = Number(row._p_extra_tickets || 0);
+        const referredBy = row._p_referred_by != null ? Number(row._p_referred_by) : null;
+        const participantsCount = Number(row._p_count || 0);
+        delete row._p_user_id;
+        delete row._p_extra_tickets;
+        delete row._p_referred_by;
+        delete row._p_count;
+        return {
+          giveaway: parseGiveawayRow(row, defaultLang),
+          isJoined,
+          extraTickets,
+          referredBy,
+          participantsCount
+        };
       }
     },
 
@@ -244,6 +296,108 @@ function createD1Database(d1, defaultLang = 'en') {
           await syncReferrerTickets(giveawayId, existing.referred_by);
         }
         return removed;
+      },
+
+      joinFast: async (giveawayId, userId, username, firstName, referredBy = null) => {
+        const candidateRef = referredBy && String(referredBy) !== String(userId) ? Number(referredBy) : null;
+        const stmts = [
+          d1
+            .prepare(`
+              INSERT OR IGNORE INTO participants (giveaway_id, user_id, username, first_name, joined_at, extra_tickets, referred_by)
+              SELECT ?, ?, ?, ?, ?, 0, (
+                SELECT p_ref.user_id FROM participants p_ref WHERE p_ref.giveaway_id = ? AND p_ref.user_id = ? LIMIT 1
+              )
+            `)
+            .bind(giveawayId, userId, username || null, firstName || '', Date.now(), giveawayId, candidateRef)
+        ];
+        if (candidateRef) {
+          stmts.push(
+            d1
+              .prepare(`
+                UPDATE participants
+                SET extra_tickets = (
+                  SELECT COUNT(*) FROM participants p2 WHERE p2.giveaway_id = ? AND p2.referred_by = ?
+                )
+                WHERE giveaway_id = ? AND user_id = ?
+              `)
+              .bind(giveawayId, candidateRef, giveawayId, candidateRef)
+          );
+        }
+        stmts.push(
+          d1
+            .prepare('SELECT extra_tickets FROM participants WHERE giveaway_id = ? AND user_id = ?')
+            .bind(giveawayId, userId),
+          d1
+            .prepare('SELECT COUNT(*) AS cnt FROM participants WHERE giveaway_id = ?')
+            .bind(giveawayId)
+        );
+
+        let results;
+        if (typeof d1.batch === 'function') {
+          results = await d1.batch(stmts);
+        } else {
+          results = [];
+          for (const stmt of stmts) {
+            results.push(await stmt.all());
+          }
+        }
+
+        const added = (results[0]?.meta?.changes || 0) > 0;
+        const selfRes = results[stmts.length - 2];
+        const countRes = results[stmts.length - 1];
+        const extraTickets = Number(selfRes?.results?.[0]?.extra_tickets ?? 0);
+        const count = Number(countRes?.results?.[0]?.cnt ?? 0);
+        return { added, extraTickets, count };
+      },
+
+      removeFast: async (giveawayId, userId, knownReferredBy = undefined) => {
+        let refId = knownReferredBy;
+        if (refId === undefined) {
+          const existing = await d1
+            .prepare('SELECT referred_by FROM participants WHERE giveaway_id = ? AND user_id = ?')
+            .bind(giveawayId, userId)
+            .first();
+          refId = existing?.referred_by || null;
+        }
+
+        const stmts = [
+          d1
+            .prepare('DELETE FROM participants WHERE giveaway_id = ? AND user_id = ?')
+            .bind(giveawayId, userId)
+        ];
+        if (refId) {
+          stmts.push(
+            d1
+              .prepare(`
+                UPDATE participants
+                SET extra_tickets = (
+                  SELECT COUNT(*) FROM participants p2 WHERE p2.giveaway_id = ? AND p2.referred_by = ?
+                )
+                WHERE giveaway_id = ? AND user_id = ?
+              `)
+              .bind(giveawayId, refId, giveawayId, refId)
+          );
+        }
+        stmts.push(
+          d1
+            .prepare('SELECT COUNT(*) AS cnt FROM participants WHERE giveaway_id = ?')
+            .bind(giveawayId)
+        );
+
+        let results;
+        if (typeof d1.batch === 'function') {
+          results = await d1.batch(stmts);
+        } else {
+          results = [];
+          for (const stmt of stmts) {
+            results.push(await stmt.all());
+          }
+        }
+
+        const removed = (results[0]?.meta?.changes || 0) > 0;
+        const countRes = results[stmts.length - 1];
+        const count = Number(countRes?.results?.[0]?.cnt ?? 0);
+        return { removed, count };
       },
 
       count: async (giveawayId) => {

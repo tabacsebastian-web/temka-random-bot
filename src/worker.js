@@ -8,8 +8,16 @@ const { createBot } = botCorePkg;
 const { createD1Database } = d1Pkg;
 const { syncBotProfile } = profilePkg;
 
-const VERSION = '3.2.0-cloudflare';
+const VERSION = '3.3.0-cloudflare';
 const botInfoCache = new Map();
+const webhookSecretCache = new Map();
+const isolateCaches = {
+  users: new Map(),
+  stats: { value: null, updatedAt: 0 },
+  channelRefresh: new Map()
+};
+let lastSweepAt = 0;
+const SWEEP_THROTTLE_MS = 45000;
 
 function logInfo(event, details = {}) {
   console.log(JSON.stringify({ level: 'info', event, ...details }));
@@ -39,7 +47,11 @@ async function getWebhookSecret(env) {
   if (!env.BOT_TOKEN) {
     return '';
   }
-  return (await sha256Hex(`${env.BOT_TOKEN}:webhook`)).slice(0, 32);
+  const cached = webhookSecretCache.get(env.BOT_TOKEN);
+  if (cached) return cached;
+  const computed = (await sha256Hex(`${env.BOT_TOKEN}:webhook`)).slice(0, 32);
+  webhookSecretCache.set(env.BOT_TOKEN, computed);
+  return computed;
 }
 
 function timingSafeEqual(a, b) {
@@ -53,7 +65,7 @@ function timingSafeEqual(a, b) {
   return diff === 0;
 }
 
-function createWorkerRuntime(env) {
+function createWorkerRuntime(env, scheduleBackground = undefined) {
   if (!env.BOT_TOKEN) {
     throw new Error('Missing BOT_TOKEN secret in Cloudflare Worker environment');
   }
@@ -67,8 +79,10 @@ function createWorkerRuntime(env) {
   let botInfo = botInfoCache.get(env.BOT_TOKEN);
   if (!botInfo && env.BOT_INFO) {
     try {
-      botInfo = JSON.parse(env.BOT_INFO);
-      botInfoCache.set(env.BOT_TOKEN, botInfo);
+      botInfo = typeof env.BOT_INFO === 'string' ? JSON.parse(env.BOT_INFO) : env.BOT_INFO;
+      if (botInfo && typeof botInfo === 'object') {
+        botInfoCache.set(env.BOT_TOKEN, botInfo);
+      }
     } catch (err) {}
   }
 
@@ -77,7 +91,9 @@ function createWorkerRuntime(env) {
     defaultLang,
     db,
     botInfo,
-    botUsername: env.BOT_USERNAME || 'TemkaDrawBot'
+    botUsername: env.BOT_USERNAME || 'TemkaDrawBot',
+    caches: isolateCaches,
+    scheduleBackground
   });
 
   return { ...runtime, db };
@@ -165,9 +181,18 @@ export default {
 
     if (path === '/webhook' && request.method === 'POST') {
       try {
-        const { bot, finalizeDueGiveaways } = createWorkerRuntime(env);
-        await ensureBotInitialized(env, bot);
-        const secretToken = await getWebhookSecret(env);
+        const scheduleBg = (promise) => {
+          ctx.waitUntil(
+            Promise.resolve(promise).catch((err) => {
+              logError('webhook_bg_error', err);
+            })
+          );
+        };
+        const { bot, finalizeDueGiveaways } = createWorkerRuntime(env, scheduleBg);
+        const [, secretToken] = await Promise.all([
+          ensureBotInitialized(env, bot),
+          getWebhookSecret(env)
+        ]);
 
         const handleWebhook = webhookCallback(bot, 'cloudflare-mod', {
           secretToken,
@@ -175,11 +200,15 @@ export default {
           timeoutMilliseconds: 25000
         });
 
-        ctx.waitUntil(
-          finalizeDueGiveaways().catch((err) => {
-            logError('webhook_scheduler_error', err);
-          })
-        );
+        const now = Date.now();
+        if (now - lastSweepAt >= SWEEP_THROTTLE_MS) {
+          lastSweepAt = now;
+          ctx.waitUntil(
+            finalizeDueGiveaways().catch((err) => {
+              logError('webhook_scheduler_error', err);
+            })
+          );
+        }
 
         return await handleWebhook(request);
       } catch (err) {
@@ -199,6 +228,8 @@ export default {
       const webhookUrl = `${url.origin}/webhook`;
       await bot.api.setWebhook(webhookUrl, {
         secret_token: secretToken,
+        allowed_updates: ['message', 'callback_query', 'my_chat_member'],
+        max_connections: 100,
         drop_pending_updates: false
       });
       const profileSynced = await syncBotProfile(bot.api);
@@ -212,7 +243,8 @@ export default {
     }
 
     if (path === '/health' || path === '/api/status') {
-      if (env.BOT_TOKEN && env.DB) {
+      if (env.BOT_TOKEN && env.DB && Date.now() - lastSweepAt >= SWEEP_THROTTLE_MS) {
+        lastSweepAt = Date.now();
         ctx.waitUntil(
           (async () => {
             const { finalizeDueGiveaways } = createWorkerRuntime(env);

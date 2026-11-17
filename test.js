@@ -166,9 +166,20 @@ assert(db.participants.get(testGid, 111).extra_tickets === 1, 'Extra tickets pre
 db.participants.remove(testGid, 222);
 assert(db.participants.get(testGid, 111).extra_tickets === 0, 'Referrer ticket must decrement if referred friend leaves');
 
+const fastSqJoin = db.participants.joinFast(testGid, 333, 'user3', 'Third', 111);
+assert(fastSqJoin.added === true && fastSqJoin.count === 2, 'SQLite joinFast adds participant and counts accurately');
+assert(db.participants.get(testGid, 111).extra_tickets === 1, 'SQLite joinFast increments referrer tickets');
+const sqState = db.giveaways.getWithParticipant(testPubId, 111);
+assert(sqState && sqState.isJoined === true && sqState.extraTickets === 1 && sqState.participantsCount === 2, 'SQLite getWithParticipant matches');
+const sqList = db.giveaways.listByCreatorWithCounts(999999);
+assert(sqList.some((item) => item.id === testGid && item.participant_count === 2), 'SQLite listByCreatorWithCounts returns participant count');
+const fastSqRemove = db.participants.removeFast(testGid, 333, 111);
+assert(fastSqRemove.removed === true && fastSqRemove.count === 1, 'SQLite removeFast removes participant and counts');
+assert(db.participants.get(testGid, 111).extra_tickets === 0, 'SQLite removeFast decrements referrer tickets');
+
 assert(db.giveaways.cancel(testGid) === true, 'Cancel active giveaway succeeds');
 assert(db.giveaways.getById(testGid).status === 'cancelled', 'Giveaway status becomes cancelled');
-console.log('✅ SQLite DB layer (referrals, count-end, cancel, settings, export/import) verified successfully!');
+console.log('✅ SQLite DB layer (referrals, count-end, batch/fast paths, cancel, settings, export/import) verified successfully!');
 
 // 5. Test Cloudflare D1 async adapter & bot-core factory
 const { createD1Database } = require('./src/db-d1');
@@ -177,10 +188,12 @@ const { createBot, parseCustomDate, recoverGiveawayFromMessage } = require('./sr
 const sqliteAsD1 = {
   prepare(sql) {
     let bound = [];
-    return {
+    const stmt = {
+      _sql: sql,
+      _getBound: () => bound,
       bind(...args) {
         bound = args;
-        return this;
+        return stmt;
       },
       async first() {
         return db.db.prepare(sql).get(...bound) || null;
@@ -193,6 +206,20 @@ const sqliteAsD1 = {
         return { meta: { changes: res.changes, last_row_id: res.lastInsertRowid } };
       }
     };
+    return stmt;
+  },
+  async batch(stmts) {
+    const out = [];
+    for (const s of stmts) {
+      const trimmed = s._sql.trim().toUpperCase();
+      if (trimmed.startsWith('SELECT')) {
+        out.push({ results: db.db.prepare(s._sql).all(...s._getBound()), success: true, meta: {} });
+      } else {
+        const res = db.db.prepare(s._sql).run(...s._getBound());
+        out.push({ results: [], success: true, meta: { changes: res.changes, last_row_id: res.lastInsertRowid } });
+      }
+    }
+    return out;
   }
 };
 
@@ -233,10 +260,16 @@ const sqliteAsD1 = {
   assert(d1Stats.activeUsers30d >= 1 && d1Stats.totalGiveaways >= 1, 'D1 public stats work');
 
   assert(await d1Db.participants.add(d1Gid, 701, 'p1', 'One') === true, 'D1 participant add works');
-  assert(await d1Db.participants.add(d1Gid, 702, 'p2', 'Two', 701) === true, 'D1 referral participant add works');
-  assert((await d1Db.participants.get(d1Gid, 701)).extra_tickets === 1, 'D1 referrer gains +1 ticket');
-  await d1Db.participants.remove(d1Gid, 702);
-  assert((await d1Db.participants.get(d1Gid, 701)).extra_tickets === 0, 'D1 referrer ticket decrements on leave');
+  const d1FastJoin = await d1Db.participants.joinFast(d1Gid, 702, 'p2', 'Two', 701);
+  assert(d1FastJoin.added === true && d1FastJoin.count === 2, 'D1 joinFast adds participant via batch');
+  assert((await d1Db.participants.get(d1Gid, 701)).extra_tickets === 1, 'D1 referrer gains +1 ticket via joinFast');
+  const d1JoinView = await d1Db.giveaways.getWithParticipant(d1PubId, 701);
+  assert(d1JoinView && d1JoinView.isJoined === true && d1JoinView.extraTickets === 1 && d1JoinView.participantsCount === 2, 'D1 getWithParticipant works');
+  const d1ListCounts = await d1Db.giveaways.listByCreatorWithCounts(888888);
+  assert(d1ListCounts.some((item) => item.id === d1Gid && item.participant_count === 2), 'D1 listByCreatorWithCounts works');
+  const d1FastRemove = await d1Db.participants.removeFast(d1Gid, 702, 701);
+  assert(d1FastRemove.removed === true && d1FastRemove.count === 1, 'D1 removeFast removes participant via batch');
+  assert((await d1Db.participants.get(d1Gid, 701)).extra_tickets === 0, 'D1 referrer ticket decrements on removeFast');
 
   const due = await d1Db.giveaways.getActiveToFinish(Date.now());
   assert(due.some((item) => item.id === d1Gid), 'D1 getActiveToFinish detects due giveaway');
@@ -253,9 +286,20 @@ const sqliteAsD1 = {
     token: '123456:TEST_TOKEN',
     db: d1Db,
     defaultLang: 'en',
-    botUsername: 'TemkaDrawBot'
+    botUsername: 'TemkaDrawBot',
+    botInfo: {
+      id: 123456,
+      is_bot: true,
+      first_name: 'Temka Random',
+      username: 'TemkaDrawBot',
+      can_join_groups: true,
+      can_read_all_group_messages: false,
+      supports_inline_queries: false
+    },
+    caches: { users: new Map(), stats: { value: null, updatedAt: 0 }, channelRefresh: new Map() },
+    scheduleBackground: (p) => Promise.resolve(p).catch(() => {})
   });
-  assert(cfBot && typeof finalizeDueGiveaways === 'function', 'createBot works with D1 adapter');
+  assert(cfBot && cfBot.isInited() === true && typeof finalizeDueGiveaways === 'function', 'createBot initializes immediately when botInfo is provided');
   assert(parseCustomDate('25.12.2030 18:00') > Date.now(), 'parseCustomDate parses future UTC date');
   const rec = recoverGiveawayFromMessage('deadbeef', {
     chat: { id: -1001, title: 'Chan', username: 'chan' },

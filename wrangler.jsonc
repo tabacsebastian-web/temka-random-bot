@@ -5,6 +5,9 @@
   "compatibility_date": "2026-11-16",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  "placement": {
+    "mode": "smart"
+  },
   "observability": {
     "enabled": true,
     "logs": {
@@ -31,7 +34,8 @@
   "vars": {
     "DEFAULT_LANG": "en",
     "BOT_USERNAME": "TemkaDrawBot",
-    "BOT_NAME": "Temka Random"
+    "BOT_NAME": "Temka Random",
+    "BOT_INFO": "{\"id\":9227279133,\"is_bot\":true,\"first_name\":\"Temka Random\",\"username\":\"TemkaDrawBot\",\"can_join_groups\":true,\"can_read_all_group_messages\":false,\"supports_inline_queries\":false,\"can_connect_to_business\":false,\"has_main_web_app\":false}"
   },
   "triggers": {
     "crons": ["* * * * *"]
